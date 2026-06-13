@@ -62,6 +62,27 @@
                     </div>
                 </div>
 
+                <!-- LIVE DIRECTORY SYNCHRONIZER -->
+                <div class="card sync-card glass">
+                    <div class="card-header">
+                        <h2>Folder Synchronizer</h2>
+                        <span class="badge" id="sync-status-badge">Inactive</span>
+                    </div>
+                    <div class="config-fields">
+                        <div class="input-group">
+                            <label for="sync-path">Local Directory Path</label>
+                            <input type="text" id="sync-path" placeholder="e.g. C:\VelocitySync" class="monospace">
+                        </div>
+                        <div class="input-group">
+                            <label for="sync-peer-id">Target Sync Peer ID</label>
+                            <div class="input-row">
+                                <input type="text" id="sync-peer-id" placeholder="e.g. peer_ab12cd" class="monospace">
+                                <button id="btn-toggle-sync" class="btn btn-primary">START SYNC</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- FILE DROPZONE & ACTIVE UPLOADER -->
                 <div class="card dropzone-card glass">
                     <div class="card-header">

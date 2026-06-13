@@ -10,6 +10,7 @@ let peerConnections = {}; // targetPeerId -> RTCPeerConnection
 let dataChannels = {};    // targetPeerId -> RTCDataChannel
 let activeTransfers = {}; // fileId -> transferState
 let selectedDropsite = { type: 'local_nas', path: '' };
+let isSyncActive = false;
 
 // Canvas configuration
 const canvas = document.getElementById('matrix-canvas');
@@ -155,6 +156,19 @@ function handleIncomingData(senderId, rawData) {
                 buffer: new Array(meta.chunksTotal)
             };
             showTransferItem(meta.fileId, meta.name, meta.size, 'download');
+        } else if (meta.type === 'folder_sync_payload') {
+            // Received remote sync payload over P2P Data Channel!
+            // Send it to our local server via WebSocket so it can write the changes to disk.
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'folder_sync_payload',
+                    sender: senderId,
+                    target: 'local_sync_engine',
+                    data: meta.data
+                }));
+                console.log(`[Sync] Received remote sync payload from peer ${senderId} over P2P, applying locally`);
+                createStreamParticle('peer', 'sender', '#00ff66', 'SYNC');
+            }
         }
     } else {
         // Parse raw binary chunk payload:
@@ -233,6 +247,35 @@ async function handleSignalingMessage(msg) {
         const pc = peerConnections[sender];
         if (pc) {
             await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        }
+    } else if (msg.type === 'folder_sync_payload') {
+        if (msg.sender === 'local_sync_engine') {
+            // This is a sync event from our OWN local server's sync engine
+            // Forward it to the target peer via WebRTC data channel first, fallback to WebSocket signaling
+            const target = msg.target;
+            const dc = dataChannels[target];
+            if (dc && dc.readyState === 'open') {
+                dc.send(JSON.stringify(msg));
+                console.log(`[Sync] Forwarded local sync payload to peer ${target} over P2P`);
+                createStreamParticle('sender', 'peer', '#00ff66', 'SYNC');
+            } else {
+                sendSignaling(target, msg);
+                console.log(`[Sync] P2P offline. Forwarded local sync payload to peer ${target} via signaling`);
+                createStreamParticle('sender', 'server', '#00ff66', 'SYNC');
+            }
+        } else {
+            // This is a sync event from a REMOTE peer!
+            // Send it to our local server via WebSocket so it can write the changes to disk.
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'folder_sync_payload',
+                    sender: msg.sender,
+                    target: 'local_sync_engine',
+                    data: msg.data
+                }));
+                console.log(`[Sync] Received remote sync payload from peer ${msg.sender}, applying locally`);
+                createStreamParticle('peer', 'sender', '#00ff66', 'SYNC');
+            }
         }
     }
 }
@@ -420,13 +463,14 @@ const nodes = {
     peer: { x: 0, y: 160 }
 };
 
-function createStreamParticle(fromNode, toNode, color) {
+function createStreamParticle(fromNode, toNode, color, label = "") {
     animParticles.push({
         from: fromNode,
         to: toNode,
         progress: 0,
         speed: 0.02,
-        color: color
+        color: color,
+        label: label
     });
 }
 
@@ -490,6 +534,12 @@ function renderMatrixVisualizer() {
         ctx.shadowBlur = 10;
         ctx.fill();
         ctx.shadowBlur = 0; // reset
+        
+        if (p.label) {
+            ctx.font = "9px 'Space Grotesk', monospace";
+            ctx.fillStyle = p.color;
+            ctx.fillText(p.label, currentX + 8, currentY - 4);
+        }
     }
     
     requestAnimationFrame(renderMatrixVisualizer);
@@ -586,6 +636,53 @@ async function fetchConfig() {
         document.getElementById('dropsite-path').value = config.path;
     }
 }
+
+// Toggle Folder Synchronization
+document.getElementById('btn-toggle-sync').addEventListener('click', async () => {
+    const path = document.getElementById('sync-path').value.trim();
+    const targetPeerIdInput = document.getElementById('sync-peer-id').value.trim();
+    
+    if (!isSyncActive) {
+        if (!path || !targetPeerIdInput) {
+            alert("Please provide both local directory path and target peer ID.");
+            return;
+        }
+        
+        const res = await fetch(`/api/share/sync/start?path=${encodeURIComponent(path)}&targetPeerId=${encodeURIComponent(targetPeerIdInput)}`, {
+            method: 'POST'
+        });
+        
+        if (res.ok) {
+            isSyncActive = true;
+            document.getElementById('btn-toggle-sync').textContent = "STOP SYNC";
+            document.getElementById('btn-toggle-sync').classList.add('btn-danger');
+            
+            const badge = document.getElementById('sync-status-badge');
+            badge.textContent = "ACTIVE";
+            badge.classList.add('badge-online');
+            console.log(`[Sync] Folder sync engine started for path: ${path} targeting peer: ${targetPeerIdInput}`);
+        } else {
+            alert("Failed to start folder synchronization.");
+        }
+    } else {
+        const res = await fetch('/api/share/sync/stop', {
+            method: 'POST'
+        });
+        
+        if (res.ok) {
+            isSyncActive = false;
+            document.getElementById('btn-toggle-sync').textContent = "START SYNC";
+            document.getElementById('btn-toggle-sync').classList.remove('btn-danger');
+            
+            const badge = document.getElementById('sync-status-badge');
+            badge.textContent = "Inactive";
+            badge.classList.remove('badge-online');
+            console.log("[Sync] Folder sync engine stopped.");
+        } else {
+            alert("Failed to stop folder synchronization.");
+        }
+    }
+});
 
 // Start visualizer loop and connections
 renderMatrixVisualizer();

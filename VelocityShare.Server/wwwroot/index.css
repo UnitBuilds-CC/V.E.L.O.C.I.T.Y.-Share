@@ -249,6 +249,16 @@ select:focus, input[type="text"]:focus {
     transform: translateY(-1px);
 }
 
+.btn-danger {
+    background: linear-gradient(135deg, #ff3366, #ff0055);
+    color: #ffffff;
+}
+
+.btn-danger:hover {
+    box-shadow: 0 0 15px rgba(255, 51, 102, 0.4);
+    transform: translateY(-1px);
+}
+
 /* DROPZONE */
 .file-dropzone {
     border: 2px dashed rgba(255, 255, 255, 0.1);

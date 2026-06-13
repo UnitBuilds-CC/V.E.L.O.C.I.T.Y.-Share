@@ -44,6 +44,78 @@ var dropsiteConfig = new ConcurrentDictionary<string, string>();
 dropsiteConfig["type"] = "local_nas";
 dropsiteConfig["path"] = defaultUploadsDir;
 
+FileSyncEngine? activeSyncEngine = null;
+
+// POST /api/share/sync/start: Starts the directory sync engine watching a local folder path
+app.MapPost("/api/share/sync/start", async (HttpContext context) =>
+{
+    string path = context.Request.Query["path"].ToString();
+    string targetPeerId = context.Request.Query["targetPeerId"].ToString();
+
+    if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(targetPeerId))
+    {
+        return Results.BadRequest("Missing path or targetPeerId parameters.");
+    }
+
+    if (!Directory.Exists(path))
+    {
+        Directory.CreateDirectory(path);
+    }
+
+    if (activeSyncEngine != null)
+    {
+        activeSyncEngine.Stop();
+        activeSyncEngine.Dispose();
+        activeSyncEngine = null;
+    }
+
+    activeSyncEngine = new FileSyncEngine(path, async (syncEventJson) =>
+    {
+        var envelope = JsonSerializer.Serialize(new
+        {
+            type = "folder_sync_payload",
+            sender = "local_sync_engine",
+            target = targetPeerId,
+            data = syncEventJson
+        });
+        byte[] payload = Encoding.UTF8.GetBytes(envelope);
+
+        // 1. Dispatch directly to target socket if it exists on this server instance (same-server peer connection)
+        if (activePeers.TryGetValue(targetPeerId, out var targetSocket) && targetSocket.State == WebSocketState.Open)
+        {
+            await targetSocket.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, CancellationToken.None);
+            Console.WriteLine($"[Sync Engine] Dispatched sync payload directly to peer {targetPeerId}");
+        }
+
+        // 2. Dispatch to all other active sockets connected to this server instance (local browser tab(s))
+        foreach (var peer in activePeers)
+        {
+            if (peer.Key != targetPeerId && peer.Value.State == WebSocketState.Open)
+            {
+                await peer.Value.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, CancellationToken.None);
+                Console.WriteLine($"[Sync Engine] Dispatched sync payload to local peer {peer.Key} for forwarding");
+            }
+        }
+    });
+
+    activeSyncEngine.Start();
+    Console.WriteLine($"[Sync Engine] Activated sync loop for path: {path} targeting peer: {targetPeerId}");
+    return Results.Ok(new { status = "STARTED", path, targetPeerId });
+});
+
+// POST /api/share/sync/stop: Stops the active sync engine
+app.MapPost("/api/share/sync/stop", () =>
+{
+    if (activeSyncEngine != null)
+    {
+        activeSyncEngine.Stop();
+        activeSyncEngine.Dispose();
+        activeSyncEngine = null;
+        Console.WriteLine("[Sync Engine] Deactivated sync loop.");
+    }
+    return Results.Ok(new { status = "STOPPED" });
+});
+
 // WebSocket Handshake and Signaling Gateway for P2P WebRTC coordination
 app.Map("/ws/share", async (HttpContext context) =>
 {
@@ -85,11 +157,34 @@ app.Map("/ws/share", async (HttpContext context) =>
                 try
                 {
                     var msgDoc = JsonDocument.Parse(rawMsg);
-                    string target = msgDoc.RootElement.TryGetProperty("target", out var targetProp) ? targetProp.GetString() ?? "" : "";
+                    string msgType = msgDoc.RootElement.TryGetProperty("type", out var typeProp) ? typeProp.GetString() ?? "" : "";
                     
+                    if (msgType == "folder_sync_payload" && activeSyncEngine != null)
+                    {
+                        string innerData = msgDoc.RootElement.GetProperty("data").GetString() ?? "";
+                        var innerDoc = JsonDocument.Parse(innerData);
+                        string syncType = innerDoc.RootElement.GetProperty("type").GetString() ?? "";
+                        string file = innerDoc.RootElement.GetProperty("file").GetString() ?? "";
+                        string hash = innerDoc.RootElement.TryGetProperty("hash", out var hashProp) ? hashProp.GetString() ?? "" : "";
+                        byte[]? contentBytes = null;
+                        if (innerDoc.RootElement.TryGetProperty("content", out var contentProp))
+                        {
+                            string base64Content = contentProp.GetString() ?? "";
+                            if (!string.IsNullOrEmpty(base64Content))
+                            {
+                                contentBytes = Convert.FromBase64String(base64Content);
+                            }
+                        }
+
+                        // Apply the remote change locally
+                        await activeSyncEngine.ApplyRemoteSyncAsync(syncType, file, hash, contentBytes);
+                        Console.WriteLine($"[Sync Engine] Applied remote {syncType} for file {file}");
+                    }
+
+                    string target = msgDoc.RootElement.TryGetProperty("target", out var targetProp) ? targetProp.GetString() ?? "" : "";
                     if (!string.IsNullOrEmpty(target) && activePeers.TryGetValue(target, out var targetSocket))
                     {
-                        // Forward signaling packet directly to recipient peer
+                        // Forward signaling/sync packet directly to recipient peer
                         if (targetSocket.State == WebSocketState.Open)
                         {
                             await targetSocket.SendAsync(new ArraySegment<byte>(buffer, 0, result.Count), WebSocketMessageType.Text, true, CancellationToken.None);
