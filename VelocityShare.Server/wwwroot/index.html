@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>V.E.L.O.C.I.T.Y. Share - Command Center</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Space+Grotesk:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <!-- Background grid decoration -->
+    <div class="background-grid"></div>
+    <div class="background-radial"></div>
+
+    <div class="app-container">
+        <!-- TOP HEADER BAR -->
+        <header class="main-header glass">
+            <div class="header-logo">
+                <span class="logo-accent">V.E.L.O.C.I.T.Y.</span>
+                <span class="logo-sub">SHARE</span>
+            </div>
+            
+            <div class="header-status">
+                <div class="status-indicator">
+                    <span class="status-dot pulse" id="connection-dot"></span>
+                    <span id="connection-status">Connecting Handshake...</span>
+                </div>
+                <div class="peer-badge">
+                    My ID: <span id="my-peer-id" class="monospace">---</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- MAIN LAYOUT -->
+        <main class="dashboard-grid">
+            <!-- LEFT COLUMN: CONTROLS & TRANSFERS -->
+            <section class="left-column">
+                <!-- DROPSITE CONFIGURATION -->
+                <div class="card config-card glass">
+                    <div class="card-header">
+                        <h2>Dropsite Configuration</h2>
+                        <span class="badge" id="dropsite-badge">Local NAS</span>
+                    </div>
+                    <div class="config-fields">
+                        <div class="input-group">
+                            <label for="dropsite-type">Type</label>
+                            <select id="dropsite-type">
+                                <option value="local_nas">Local NAS / Directory</option>
+                                <option value="google_drive_mock">Google Drive (Secure Mock)</option>
+                                <option value="onedrive_mock">OneDrive (Secure Mock)</option>
+                            </select>
+                        </div>
+                        <div class="input-group">
+                            <label for="dropsite-path">Dumpsite Path / Endpoint</label>
+                            <div class="input-row">
+                                <input type="text" id="dropsite-path" placeholder="e.g. C:\Share\NAS" class="monospace">
+                                <button id="btn-save-config" class="btn btn-primary">SAVE</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- FILE DROPZONE & ACTIVE UPLOADER -->
+                <div class="card dropzone-card glass">
+                    <div class="card-header">
+                        <h2>File Dispatcher</h2>
+                    </div>
+                    
+                    <div class="file-dropzone" id="dropzone">
+                        <div class="dropzone-icon">
+                            <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+                            </svg>
+                        </div>
+                        <div class="dropzone-text">
+                            <h3>Drag & Drop Files Here</h3>
+                            <p>or click to browse local directory</p>
+                        </div>
+                        <input type="file" id="file-input" class="hidden-input" multiple>
+                    </div>
+
+                    <div id="active-transfers-container" class="hidden">
+                        <div class="transfer-list-header">
+                            <h3>Active Streams</h3>
+                        </div>
+                        <div class="transfer-list" id="transfer-list">
+                            <!-- Transfer items populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- PEER LIST ROSTER -->
+                <div class="card peer-card glass">
+                    <div class="card-header">
+                        <h2>Available Peers</h2>
+                        <span class="badge badge-online" id="peer-count">0 Online</span>
+                    </div>
+                    <div class="peer-list" id="peer-list">
+                        <div class="empty-peers">No other peers online. Open another tab or browser to test P2P file sharing!</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- RIGHT COLUMN: TELEMETRY & LIVE CANVAS -->
+            <section class="right-column">
+                <!-- LIVE CONNECTION VISUALIZER -->
+                <div class="card visualizer-card glass">
+                    <div class="card-header">
+                        <h2>P2P Stream Matrix</h2>
+                        <span class="matrix-legend">Real-Time Canvas Map</span>
+                    </div>
+                    <div class="canvas-container">
+                        <canvas id="matrix-canvas"></canvas>
+                        <div class="node-label sender-label">SENDER (Local)</div>
+                        <div class="node-label server-label">GATEWAY (Server)</div>
+                        <div class="node-label receiver-label">PEER (Remote)</div>
+                    </div>
+                </div>
+
+                <!-- TELEMETRY SPEED DIALS -->
+                <div class="card telemetry-card glass">
+                    <div class="card-header">
+                        <h2>Transmission Telemetry</h2>
+                    </div>
+                    <div class="telemetry-grid">
+                        <div class="dial-container">
+                            <div class="speed-dial" id="dial-upload">
+                                <svg class="dial-svg" viewBox="0 0 100 100">
+                                    <circle class="dial-bg" cx="50" cy="50" r="40"></circle>
+                                    <circle class="dial-progress" id="progress-upload" cx="50" cy="50" r="40"></circle>
+                                </svg>
+                                <div class="dial-text">
+                                    <span class="dial-val" id="val-upload">0.0</span>
+                                    <span class="dial-unit">MB/s</span>
+                                </div>
+                            </div>
+                            <span class="dial-label">Upload Rate</span>
+                        </div>
+
+                        <div class="dial-container">
+                            <div class="speed-dial" id="dial-download">
+                                <svg class="dial-svg" viewBox="0 0 100 100">
+                                    <circle class="dial-bg" cx="50" cy="50" r="40"></circle>
+                                    <circle class="dial-progress" id="progress-download" cx="50" cy="50" r="40"></circle>
+                                </svg>
+                                <div class="dial-text">
+                                    <span class="dial-val" id="val-download">0.0</span>
+                                    <span class="dial-unit">MB/s</span>
+                                </div>
+                            </div>
+                            <span class="dial-label">Download Rate</span>
+                        </div>
+
+                        <div class="dial-container">
+                            <div class="speed-dial" id="dial-saturation">
+                                <svg class="dial-svg" viewBox="0 0 100 100">
+                                    <circle class="dial-bg" cx="50" cy="50" r="40"></circle>
+                                    <circle class="dial-progress" id="progress-saturation" cx="50" cy="50" r="40"></circle>
+                                </svg>
+                                <div class="dial-text">
+                                    <span class="dial-val" id="val-saturation">0</span>
+                                    <span class="dial-unit">%</span>
+                                </div>
+                            </div>
+                            <span class="dial-label">Link Saturation</span>
+                        </div>
+
+                        <div class="dial-container">
+                            <div class="speed-dial" id="dial-latency">
+                                <svg class="dial-svg" viewBox="0 0 100 100">
+                                    <circle class="dial-bg" cx="50" cy="50" r="40"></circle>
+                                    <circle class="dial-progress" id="progress-latency" cx="50" cy="50" r="40"></circle>
+                                </svg>
+                                <div class="dial-text">
+                                    <span class="dial-val" id="val-latency">0</span>
+                                    <span class="dial-unit">ms</span>
+                                </div>
+                            </div>
+                            <span class="dial-label">RTT Latency</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+</body>
+</html>

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="velocity_share_ffi.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <Target Name="CopyRustDll" BeforeTargets="Build">
+    <Copy SourceFiles="..\velocity_share_ffi\target\release\velocity_share_ffi.dll" DestinationFolder="." SkipUnchangedFiles="true" Condition="Exists('..\velocity_share_ffi\target\release\velocity_share_ffi.dll')" />
+  </Target>
+
+</Project>

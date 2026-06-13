@@ -1,0 +1,24 @@
+# C# Build Artifacts
+**/[Bb]in/
+**/[Oo]bj/
+**/.vs/
+**/.idea/
+**/.vscode/
+
+# Rust Build Artifacts
+**/target/
+
+# Local Uploads and Temp Directories
+**/wwwroot/uploads/
+**/Updates/
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS files
+.DS_Store
+Thumbs.db
