@@ -178,6 +178,13 @@ app.MapPost("/api/share/upload", async (HttpContext context) =>
         return Results.BadRequest("Missing required fields (file, fileId, chunkIndex).");
     }
 
+    // Strictly sanitize and validate inputs to prevent Path Traversal attacks
+    if (!System.Text.RegularExpressions.Regex.IsMatch(fileId, "^[a-zA-Z0-9_-]+$") ||
+        !System.Text.RegularExpressions.Regex.IsMatch(chunkIndexStr, "^\\d+$"))
+    {
+        return Results.BadRequest("Invalid fileId or chunkIndex formatting. Threat detected.");
+    }
+
     // Save to the configured dropsite
     string targetFolder = Path.Combine(dropsiteConfig["path"], fileId);
     if (!Directory.Exists(targetFolder))
@@ -215,6 +222,13 @@ app.MapGet("/api/share/download", async (HttpContext context) =>
     if (string.IsNullOrEmpty(fileId) || string.IsNullOrEmpty(chunkIndexStr))
     {
         return Results.BadRequest("Missing required parameters (fileId, chunkIndex).");
+    }
+
+    // Strictly sanitize and validate inputs to prevent Path Traversal attacks
+    if (!System.Text.RegularExpressions.Regex.IsMatch(fileId, "^[a-zA-Z0-9_-]+$") ||
+        !System.Text.RegularExpressions.Regex.IsMatch(chunkIndexStr, "^\\d+$"))
+    {
+        return Results.BadRequest("Invalid fileId or chunkIndex formatting. Threat detected.");
     }
 
     string targetFolder = Path.Combine(dropsiteConfig["path"], fileId);
