@@ -376,6 +376,88 @@ app.MapGet("/api/share/test", () =>
     }
 });
 
+// GET /api/share/test/benchmark: Runs relative performance comparison benchmark for V.E.L.O.C.I.T.Y. Share crypto
+app.MapGet("/api/share/test/benchmark", () =>
+{
+    try
+    {
+        byte[] block = new byte[64 * 1024]; // 64KB chunk size
+        Random.Shared.NextBytes(block);
+        byte[] key = new byte[32];
+        byte[] nonce = new byte[12];
+        Random.Shared.NextBytes(key);
+        Random.Shared.NextBytes(nonce);
+
+        const int iterations = 10000;
+        double totalMb = (double)iterations * block.Length / (1024.0 * 1024.0);
+
+        // 1. SHA-256 Hashing Benchmarks
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < iterations; i++)
+        {
+            byte[] hash = VelocityShareCrypto.HashChunk(block);
+        }
+        sw.Stop();
+        double rustHashMs = sw.Elapsed.TotalMilliseconds;
+        double rustHashSpeed = totalMb / (rustHashMs / 1000.0);
+
+        sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < iterations; i++)
+        {
+            byte[] hash = System.Security.Cryptography.SHA256.HashData(block);
+        }
+        sw.Stop();
+        double netHashMs = sw.Elapsed.TotalMilliseconds;
+        double netHashSpeed = totalMb / (netHashMs / 1000.0);
+
+        // 2. ChaCha20-Poly1305 Encrypt/Decrypt Loop Benchmarks
+        sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < iterations; i++)
+        {
+            var (cipher, tag) = VelocityShareCrypto.EncryptBlock(block, key, nonce);
+            byte[] decrypted = VelocityShareCrypto.DecryptBlock(cipher, key, nonce, tag);
+        }
+        sw.Stop();
+        double rustCipherMs = sw.Elapsed.TotalMilliseconds;
+        double rustCipherSpeed = totalMb / (rustCipherMs / 1000.0);
+
+        sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < iterations; i++)
+        {
+            using var chacha = new System.Security.Cryptography.ChaCha20Poly1305(key);
+            byte[] cipher = new byte[block.Length];
+            byte[] tag = new byte[16];
+            byte[] decrypted = new byte[block.Length];
+            chacha.Encrypt(nonce, block, cipher, tag);
+            chacha.Decrypt(nonce, cipher, tag, decrypted);
+        }
+        sw.Stop();
+        double netCipherMs = sw.Elapsed.TotalMilliseconds;
+        double netCipherSpeed = totalMb / (netCipherMs / 1000.0);
+
+        return Results.Ok(new
+        {
+            message = "V.E.L.O.C.I.T.Y. Share Cryptographic Engine Benchmarks (625 MB processed per phase)",
+            sha256 = new
+            {
+                rust_ffi = new { time_ms = rustHashMs, speed_mbps = rustHashSpeed },
+                net_native = new { time_ms = netHashMs, speed_mbps = netHashSpeed },
+                relative_ratio = netHashMs / rustHashMs
+            },
+            chacha20_poly1305 = new
+            {
+                rust_ffi = new { time_ms = rustCipherMs, speed_mbps = rustCipherSpeed },
+                net_native = new { time_ms = netCipherMs, speed_mbps = netCipherSpeed },
+                relative_ratio = netCipherMs / rustCipherMs
+            }
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Benchmark failed: {ex.Message}");
+    }
+});
+
 app.MapGet("/", async (HttpContext context) =>
 {
     context.Response.ContentType = "text/html";
