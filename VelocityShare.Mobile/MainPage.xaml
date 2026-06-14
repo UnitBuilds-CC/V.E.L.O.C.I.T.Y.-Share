@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="VelocityShare.Mobile.MainPage"
+             BackgroundColor="#080a10">
+
+    <Grid RowDefinitions="Auto, *, Auto" Padding="20">
+        
+        <!-- HEADER BAR -->
+        <HorizontalStackLayout Grid.Row="0" HorizontalOptions="Fill" Margin="0,0,0,20">
+            <Label Text="V.E.L.O.C.I.T.Y." FontAttributes="Bold" FontSize="24" TextColor="#00ff66" VerticalOptions="Center"/>
+            <Label Text=" SHARE MOBILE" FontSize="24" TextColor="#ffffff" VerticalOptions="Center" Margin="5,0,0,0"/>
+        </HorizontalStackLayout>
+
+        <!-- MAIN LAYOUT -->
+        <ScrollView Grid.Row="1">
+            <VerticalStackLayout Spacing="15">
+                
+                <!-- CONNECTION PROFILE CARD -->
+                <Frame BackgroundColor="#0d111c" BorderColor="#22ffffff" CornerRadius="12" Padding="15">
+                    <VerticalStackLayout Spacing="10">
+                        <Label Text="Sync Profile Configuration" TextColor="#ffffff" FontSize="16" FontAttributes="Bold"/>
+                        
+                        <Label Text="Server URL" TextColor="#9ca3af" FontSize="12" Margin="0,5,0,0"/>
+                        <Entry x:Name="ServerUrlEntry" Text="http://localhost:5077" TextColor="#ffffff" BackgroundColor="#000000" Margin="0,2,0,0"/>
+
+                        <Label Text="Local Path to Sync" TextColor="#9ca3af" FontSize="12" Margin="0,5,0,0"/>
+                        <Entry x:Name="LocalPathEntry" Text="" TextColor="#ffffff" BackgroundColor="#000000" Margin="0,2,0,0"/>
+
+                        <Label Text="Target Peer ID" TextColor="#9ca3af" FontSize="12" Margin="0,5,0,0"/>
+                        <Entry x:Name="TargetPeerIdEntry" Placeholder="e.g. peer_abc123" TextColor="#ffffff" BackgroundColor="#000000" Margin="0,2,0,0"/>
+                    </VerticalStackLayout>
+                </Frame>
+
+                <!-- STATUS & TELEMETRY CARD -->
+                <Frame BackgroundColor="#0d111c" BorderColor="#22ffffff" CornerRadius="12" Padding="15">
+                    <Grid ColumnDefinitions="*, *" RowDefinitions="Auto, Auto" RowSpacing="10">
+                        <Label Grid.Row="0" Grid.Column="0" Text="Link Status:" TextColor="#9ca3af" FontSize="13" VerticalOptions="Center"/>
+                        <Label Grid.Row="0" Grid.Column="1" x:Name="StatusBadge" Text="INACTIVE" TextColor="#ff3366" FontAttributes="Bold" FontSize="13" HorizontalOptions="End" VerticalOptions="Center"/>
+
+                        <Label Grid.Row="1" Grid.Column="0" Text="My Peer ID:" TextColor="#9ca3af" FontSize="13" VerticalOptions="Center"/>
+                        <Label Grid.Row="1" Grid.Column="1" x:Name="MyPeerIdLabel" Text="peer_mobile" TextColor="#00e5ff" FontSize="13" HorizontalOptions="End" VerticalOptions="Center"/>
+                    </Grid>
+                </Frame>
+
+                <!-- CONSOLE LOGS -->
+                <Frame BackgroundColor="#05070a" BorderColor="#22ffffff" CornerRadius="12" Padding="15" HeightRequest="180">
+                    <ScrollView x:Name="LogScroll">
+                        <Label x:Name="LogLabel" Text="[Console] Awaiting sync loop initiation...&#10;" TextColor="#00ff66" FontFamily="monospace" FontSize="11"/>
+                    </ScrollView>
+                </Frame>
+
+                <!-- TRIGGER BUTTON -->
+                <Button x:Name="ToggleSyncBtn"
+                        Text="START FOLDER SYNC"
+                        Clicked="OnToggleSyncClicked"
+                        BackgroundColor="#00ff66"
+                        TextColor="#080a10"
+                        FontAttributes="Bold"
+                        CornerRadius="8"
+                        HeightRequest="45"
+                        Margin="0,10,0,0"/>
+                
+            </VerticalStackLayout>
+        </ScrollView>
+        
+        <!-- FOOTER -->
+        <Label Grid.Row="2" Text="V.E.L.O.C.I.T.Y. Suite. Secure Zero-Knowledge Sync." TextColor="#6b7280" FontSize="11" HorizontalOptions="Center" Margin="0,10,0,0"/>
+        
+    </Grid>
+
+</ContentPage>
