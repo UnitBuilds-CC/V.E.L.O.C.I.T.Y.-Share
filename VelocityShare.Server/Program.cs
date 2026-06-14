@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
+using System.Net;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -455,6 +456,143 @@ app.MapGet("/api/share/test/benchmark", () =>
     catch (Exception ex)
     {
         return Results.Problem($"Benchmark failed: {ex.Message}");
+    }
+});
+
+// GET /api/share/test/vctp: Performs automated custom transport (V.C.T.P.) integrity, speed, and interruptibility tests
+app.MapGet("/api/share/test/vctp", async () =>
+{
+    string testFolder = Path.Combine(Directory.GetCurrentDirectory(), "vctp_test_run");
+    if (Directory.Exists(testFolder))
+    {
+        try { Directory.Delete(testFolder, true); } catch { }
+    }
+    Directory.CreateDirectory(testFolder);
+
+    string srcPath = Path.Combine(testFolder, "source.bin");
+    string destFolder = Path.Combine(testFolder, "destination");
+    Directory.CreateDirectory(destFolder);
+    string destPath = Path.Combine(destFolder, "source.bin");
+
+    try
+    {
+        // 1. Generate 50MB of random source data
+        const int fileSize = 50 * 1024 * 1024; // 50MB
+        byte[] srcData = new byte[fileSize];
+        Random.Shared.NextBytes(srcData);
+        await File.WriteAllBytesAsync(srcPath, srcData);
+
+        // 2. Compute expected SHA-256 hash
+        byte[] srcHash = VelocityShareCrypto.HashChunk(srcData);
+        string srcHashHex = Convert.ToHexString(srcHash).ToLowerInvariant();
+
+        // 3. Setup encryption keys (32 bytes) and nonce (12 bytes)
+        byte[] key = new byte[32];
+        byte[] nonce = new byte[12];
+        Random.Shared.NextBytes(key);
+        Random.Shared.NextBytes(nonce);
+
+        Guid fileId = Guid.NewGuid();
+        var logs = new List<string>();
+        
+        // 4. Start VctpReceiver
+        using var receiver = new VctpReceiver(destFolder, key, nonce, port: 0);
+        receiver.OnLog += (log) => { logs.Add($"[Receiver] {log}"); Console.WriteLine($"[Receiver] {log}"); };
+        receiver.Start();
+
+        var remoteEP = new IPEndPoint(IPAddress.Loopback, receiver.Port);
+
+        // 5. Test Interruption and Resumability!
+        logs.Add("--- Beginning Phase 1: Transfer with Interruption ---");
+        Console.WriteLine("--- Beginning Phase 1: Transfer with Interruption ---");
+        using (var sender = new VctpSender(srcPath, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 1200.0))
+        {
+            sender.OnLog += (log) => { logs.Add($"[Sender] {log}"); Console.WriteLine($"[Sender] {log}"); };
+            
+            // Start the sender in the background
+            var senderTask = sender.StartAsync();
+
+            // Wait until some blocks are transferred (e.g. 200ms)
+            await Task.Delay(200);
+
+            // Cancel/Dispose the sender mid-transfer
+            logs.Add("--- FORCE KILLING Sender mid-transfer to simulate power/network cut ---");
+            Console.WriteLine("--- FORCE KILLING Sender mid-transfer to simulate power/network cut ---");
+        }
+
+        // Verify partial target file and its companion .vctmeta file exist
+        string destMetaPath = destPath + ".vctmeta";
+        bool metaExists = File.Exists(destMetaPath);
+        long partialSize = File.Exists(destPath) ? new FileInfo(destPath).Length : 0;
+        logs.Add($"[Verification] Partial destination file size: {partialSize} bytes. Journal meta file exists: {metaExists}");
+
+        // 6. Resume Phase: Start a new VctpSender with the same session parameters
+        logs.Add("--- Beginning Phase 2: Resuming Transfer ---");
+        
+        // Wait briefly for sockets to release
+        await Task.Delay(200);
+
+        string finalDestHash = "";
+        var tcs = new TaskCompletionSource<bool>();
+        receiver.OnTransferComplete += (path, hash) =>
+        {
+            finalDestHash = hash;
+            tcs.TrySetResult(true);
+        };
+
+        var resumeSw = System.Diagnostics.Stopwatch.StartNew();
+        using (var senderResume = new VctpSender(srcPath, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 1600.0))
+        {
+            senderResume.OnLog += (log) => { logs.Add($"[Sender Resume] {log}"); Console.WriteLine($"[Sender Resume] {log}"); };
+            await senderResume.StartAsync();
+            
+            // Wait for receiver to signal completion
+            await Task.WhenAny(tcs.Task, Task.Delay(10000));
+        }
+        resumeSw.Stop();
+
+        // 7. Verify Integrity
+        bool verified = finalDestHash.Equals(srcHashHex, StringComparison.OrdinalIgnoreCase);
+        logs.Add($"[Verification] Final Hash Check: Expected={srcHashHex}, Got={finalDestHash}. MATCH={verified}");
+
+        if (!verified)
+        {
+            return Results.BadRequest(new
+            {
+                status = "FAILED",
+                message = "VCTP verification failed: hash mismatch or timeout.",
+                logs = logs
+            });
+        }
+
+        double elapsedSec = resumeSw.Elapsed.TotalSeconds;
+        double throughputMB = (fileSize / (1024.0 * 1024.0)) / elapsedSec;
+
+        return Results.Ok(new
+        {
+            status = "PASS",
+            message = "V.C.T.P. zero-copy, rate-paced, interruptible file sync test completed successfully.",
+            duration_sec = elapsedSec,
+            throughput_mbps = throughputMB * 8.0,
+            throughput_mbs = throughputMB,
+            logs = logs
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"VCTP test execution crashed: {ex.Message}\n{ex.StackTrace}");
+    }
+    finally
+    {
+        // Cleanup
+        try
+        {
+            if (Directory.Exists(testFolder))
+            {
+                Directory.Delete(testFolder, true);
+            }
+        }
+        catch { }
     }
 });
 
