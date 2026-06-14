@@ -169,6 +169,7 @@ namespace VelocityShare.Server
         private readonly byte[] _cryptoNonce;
         private readonly int _blockSize = 32768; // Optimized to 32KB
         private readonly double _targetRateMbps;
+        private readonly MemoryMappedFile? _providedMmf;
 
         private MemoryMappedFile? _mmf;
         private MemoryMappedViewAccessor? _mmfAccessor;
@@ -194,6 +195,7 @@ namespace VelocityShare.Server
             _cryptoKey = cryptoKey;
             _cryptoNonce = cryptoNonce;
             _targetRateMbps = targetRateMbps;
+            _providedMmf = null;
 
             _fileSize = new FileInfo(filePath).Length;
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
@@ -202,10 +204,36 @@ namespace VelocityShare.Server
             _socket.Connect(_remoteEndPoint);
         }
 
+        public VctpSender(MemoryMappedFile mmf, long fileSize, Guid fileId, string expectedHash, IPEndPoint remoteEndPoint, byte[] cryptoKey, byte[] cryptoNonce, double targetRateMbps = 500.0)
+        {
+            _filePath = "";
+            _fileId = fileId;
+            _expectedHash = expectedHash;
+            _remoteEndPoint = remoteEndPoint;
+            _cryptoKey = cryptoKey;
+            _cryptoNonce = cryptoNonce;
+            _targetRateMbps = targetRateMbps;
+            _providedMmf = mmf;
+            _fileSize = fileSize;
+
+            _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
+
+            _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            _socket.Connect(_remoteEndPoint);
+        }
+
         private unsafe void InitSenderMmf()
         {
-            _mmf = MemoryMappedFile.CreateFromFile(_filePath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
-            _mmfAccessor = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+            if (_providedMmf != null)
+            {
+                _mmf = _providedMmf;
+                _mmfAccessor = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+            }
+            else
+            {
+                _mmf = MemoryMappedFile.CreateFromFile(_filePath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
+                _mmfAccessor = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+            }
             _safeBuffer = _mmfAccessor.SafeMemoryMappedViewHandle;
             
             byte* ptr = null;
@@ -531,7 +559,10 @@ namespace VelocityShare.Server
                 _safeBuffer.ReleasePointer();
             }
             _mmfAccessor?.Dispose();
-            _mmf?.Dispose();
+            if (_providedMmf == null)
+            {
+                _mmf?.Dispose();
+            }
             _mmfPtr = IntPtr.Zero;
         }
 
@@ -550,6 +581,7 @@ namespace VelocityShare.Server
         private readonly byte[] _cryptoKey;
         private readonly byte[] _cryptoNonce;
         private readonly int _blockSize = 32768; // Optimized to 32KB
+        private readonly MemoryMappedFile? _providedMmf;
 
         private Guid _fileId;
         private string _targetFilePath = "";
@@ -589,6 +621,20 @@ namespace VelocityShare.Server
             _targetFolder = targetFolder;
             _cryptoKey = cryptoKey;
             _cryptoNonce = cryptoNonce;
+            _providedMmf = null;
+
+            _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            _socket.Bind(new IPEndPoint(IPAddress.Any, port));
+            this.Port = ((IPEndPoint)_socket.LocalEndPoint!).Port;
+        }
+
+        public VctpReceiver(MemoryMappedFile mmf, long fileSize, string targetFolder, byte[] cryptoKey, byte[] cryptoNonce, int port = 0)
+        {
+            _targetFolder = targetFolder;
+            _cryptoKey = cryptoKey;
+            _cryptoNonce = cryptoNonce;
+            _providedMmf = mmf;
+            _fileSize = fileSize;
 
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             _socket.Bind(new IPEndPoint(IPAddress.Any, port));
@@ -656,8 +702,16 @@ namespace VelocityShare.Server
 
         private unsafe void InitReceiverMmf()
         {
-            _mmf = MemoryMappedFile.CreateFromFile(_targetFilePath, FileMode.Open, null, 0, MemoryMappedFileAccess.ReadWrite);
-            _mmfAccessor = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite);
+            if (_providedMmf != null)
+            {
+                _mmf = _providedMmf;
+                _mmfAccessor = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite);
+            }
+            else
+            {
+                _mmf = MemoryMappedFile.CreateFromFile(_targetFilePath, FileMode.Open, null, 0, MemoryMappedFileAccess.ReadWrite);
+                _mmfAccessor = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite);
+            }
             _safeBuffer = _mmfAccessor.SafeMemoryMappedViewHandle;
 
             byte* ptr = null;
@@ -689,20 +743,23 @@ namespace VelocityShare.Server
 
                 OnLog?.Invoke($"[VCTP Receiver] Initializing session {_fileId} for file {fileName} ({_fileSize} bytes)");
 
-                string? dir = Path.GetDirectoryName(_targetFilePath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                if (_providedMmf == null)
                 {
-                    Directory.CreateDirectory(dir);
-                }
+                    string? dir = Path.GetDirectoryName(_targetFilePath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    {
+                        Directory.CreateDirectory(dir);
+                    }
 
-                using (var fs = new FileStream(_targetFilePath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite))
-                {
-                    fs.SetLength(_fileSize);
+                    using (var fs = new FileStream(_targetFilePath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite))
+                    {
+                        fs.SetLength(_fileSize);
+                    }
                 }
 
                 InitReceiverMmf();
 
-                if (File.Exists(_metaFilePath))
+                if (_providedMmf == null && File.Exists(_metaFilePath))
                 {
                     try
                     {
@@ -755,7 +812,10 @@ namespace VelocityShare.Server
                 BlockSize = _blockSize,
                 BlockBitmap = new byte[(int)Math.Ceiling((double)_totalBlocks / 8.0)]
             };
-            meta.Save(_metaFilePath);
+            if (_providedMmf == null)
+            {
+                meta.Save(_metaFilePath);
+            }
             return meta;
         }
 
@@ -886,7 +946,7 @@ namespace VelocityShare.Server
 
         private void FlushMetadata(object? state)
         {
-            if (_metadata != null && !_isFinished)
+            if (_metadata != null && !_isFinished && _providedMmf == null)
             {
                 lock (_metadata)
                 {
@@ -902,7 +962,10 @@ namespace VelocityShare.Server
                 _safeBuffer.ReleasePointer();
             }
             _mmfAccessor?.Dispose();
-            _mmf?.Dispose();
+            if (_providedMmf == null)
+            {
+                _mmf?.Dispose();
+            }
             _mmfPtr = IntPtr.Zero;
         }
 
@@ -972,13 +1035,13 @@ namespace VelocityShare.Server
 
                 _isFinished = true;
 
-                if (File.Exists(_metaFilePath))
+                if (_providedMmf == null && File.Exists(_metaFilePath))
                 {
                     File.Delete(_metaFilePath);
                 }
 
                 OnLog?.Invoke($"[VCTP Receiver] Verification check completed. Integrity guaranteed by block-level AEAD.");
-                OnTransferComplete?.Invoke(_targetFilePath, _expectedHash);
+                OnTransferComplete?.Invoke(_providedMmf != null ? "in_memory" : _targetFilePath, _expectedHash);
 
                 try { SendEofAck(); } catch { }
             }
