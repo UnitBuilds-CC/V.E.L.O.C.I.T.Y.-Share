@@ -182,6 +182,7 @@ namespace VelocityShare.Server
         private bool _isFinished = false;
         private bool _receiverConfirmedComplete = false;
         private CancellationTokenSource _cts = new CancellationTokenSource();
+        private readonly BlockingCollection<(int Index, byte[] Bytes)> _packetQueue = new(128);
 
         public event Action<int, int>? OnProgress;
         public event Action<string>? OnLog;
@@ -306,6 +307,54 @@ namespace VelocityShare.Server
             _socket.Send(packetBytes, SocketFlags.None);
         }
 
+        private void StartEncryptionProducer()
+        {
+            int numWorkers = Math.Max(2, Environment.ProcessorCount / 2);
+            int nextBlockToEncrypt = 0;
+            int activeWorkers = numWorkers;
+
+            for (int w = 0; w < numWorkers; w++)
+            {
+                var thread = new Thread(() =>
+                {
+                    try
+                    {
+                        while (!_cts.IsCancellationRequested)
+                        {
+                            int blockIndex = Interlocked.Increment(ref nextBlockToEncrypt) - 1;
+                            if (blockIndex >= _totalBlocks) break;
+
+                            if (!_metadata!.IsBlockCompleted(blockIndex))
+                            {
+                                var packet = CreateBlockPacket(blockIndex, out _);
+                                if (packet != null && packet.Length > 0)
+                                {
+                                    _packetQueue.Add((blockIndex, packet), _cts.Token);
+                                }
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (Exception ex)
+                    {
+                        OnLog?.Invoke($"[VCTP Sender Encryption Worker] Error: {ex.Message}");
+                    }
+                    finally
+                    {
+                        if (Interlocked.Decrement(ref activeWorkers) == 0)
+                        {
+                            _packetQueue.CompleteAdding();
+                        }
+                    }
+                })
+                {
+                    IsBackground = true,
+                    Name = $"VCTP-Encryptor-{w}"
+                };
+                thread.Start();
+            }
+        }
+
         private async Task RunPacingLoopAsync()
         {
             double bytesPerSecond = (_targetRateMbps * 1024 * 1024) / 8.0;
@@ -314,39 +363,47 @@ namespace VelocityShare.Server
 
             long nextSendTime = Stopwatch.GetTimestamp();
 
+            // Start background encryption producer
+            StartEncryptionProducer();
+
             // 1. Initial Blast Phase
-            for (int i = 0; i < _totalBlocks; i++)
+            try
             {
-                if (_cts.IsCancellationRequested || _isFinished) break;
-
-                // Process pending NACKs first
-                while (_nackQueue.TryDequeue(out int nackIndex))
+                foreach (var item in _packetQueue.GetConsumingEnumerable(_cts.Token))
                 {
-                    SendBlock(nackIndex);
-                }
+                    if (_cts.IsCancellationRequested || _isFinished) break;
 
-                if (_metadata!.IsBlockCompleted(i))
-                {
-                    continue; // Skip already completed blocks
-                }
-
-                // Wait until it is time to pace the next packet
-                while (Stopwatch.GetTimestamp() < nextSendTime)
-                {
-                    int remainingMs = (int)((nextSendTime - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency);
-                    if (remainingMs > 0)
+                    // Process pending NACKs first
+                    while (_nackQueue.TryDequeue(out int nackIndex))
                     {
-                        await Task.Delay(remainingMs);
+                        SendBlock(nackIndex);
                     }
-                    else
-                    {
-                        Thread.SpinWait(10);
-                    }
-                }
 
-                SendBlock(i);
-                nextSendTime += ticksPerBlock;
+                    // Wait until it is time to pace the next packet
+                    if (_targetRateMbps < 10000.0)
+                    {
+                        while (Stopwatch.GetTimestamp() < nextSendTime)
+                        {
+                            int remainingMs = (int)((nextSendTime - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency);
+                            if (remainingMs > 0)
+                            {
+                                await Task.Delay(remainingMs);
+                            }
+                            else
+                            {
+                                Thread.SpinWait(10);
+                            }
+                        }
+                    }
+
+                    _socket.Send(item.Bytes, SocketFlags.None);
+                    _metadata!.MarkBlockCompleted(item.Index);
+                    OnProgress?.Invoke(item.Index + 1, _totalBlocks);
+
+                    nextSendTime += ticksPerBlock;
+                }
             }
+            catch (OperationCanceledException) { }
 
             // 2. Retransmission & Verification Phase
             int eofRetries = 0;
@@ -400,7 +457,11 @@ namespace VelocityShare.Server
                 // Call Rust FFI ChaCha20-Poly1305 encryption in-place
                 fixed (byte* pKey = _cryptoKey, pNonce = _cryptoNonce)
                 {
-                    int res = VelocityShareCrypto.encrypt_block_chacha(pKey, pNonce, pCiphertext, (nuint)length, pTag);
+                    byte* pBlockNonce = stackalloc byte[12];
+                    for (int j = 0; j < 8; j++) pBlockNonce[j] = pNonce[j];
+                    *(uint*)(pBlockNonce + 8) = (uint)index;
+
+                    int res = VelocityShareCrypto.encrypt_block_chacha(pKey, pBlockNonce, pCiphertext, (nuint)length, pTag);
                     if (res != 0)
                     {
                         throw new InvalidOperationException($"FFI Encryption failed with code {res}");
@@ -569,6 +630,7 @@ namespace VelocityShare.Server
         public void Dispose()
         {
             _cts.Cancel();
+            _packetQueue.Dispose();
             CleanupSenderMmf();
             _socket.Dispose();
         }
@@ -609,6 +671,8 @@ namespace VelocityShare.Server
         private CancellationTokenSource _cts = new CancellationTokenSource();
         private System.Threading.Timer? _nackTimer;
         private System.Threading.Timer? _flushTimer;
+        private readonly BlockingCollection<(VctpHeader Header, byte[] Payload)> _decryptQueue = new(256);
+        private readonly object _stateLock = new object();
 
         public event Action<int, int>? OnProgress;
         public event Action<string>? OnLog;
@@ -641,6 +705,40 @@ namespace VelocityShare.Server
             this.Port = ((IPEndPoint)_socket.LocalEndPoint!).Port;
         }
 
+        private void StartDecryptionWorkers()
+        {
+            int numWorkers = Math.Max(2, Environment.ProcessorCount / 2);
+            for (int i = 0; i < numWorkers; i++)
+            {
+                var thread = new Thread(() =>
+                {
+                    try
+                    {
+                        foreach (var item in _decryptQueue.GetConsumingEnumerable(_cts.Token))
+                        {
+                            unsafe
+                            {
+                                fixed (byte* pPayload = item.Payload)
+                                {
+                                    HandleDataPacket(item.Header, pPayload);
+                                }
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (Exception ex)
+                    {
+                        OnLog?.Invoke($"[VCTP Receiver Decryption Worker] Error: {ex.Message}");
+                    }
+                })
+                {
+                    IsBackground = true,
+                    Name = $"VCTP-Decryptor-{i}"
+                };
+                thread.Start();
+            }
+        }
+
         public void Start()
         {
             if (_isStarted) return;
@@ -649,6 +747,7 @@ namespace VelocityShare.Server
             OnLog?.Invoke($"[VCTP Receiver] Listening on port {Port}");
 
             _ = Task.Run(ReceiveLoopAsync, _cts.Token);
+            StartDecryptionWorkers();
 
             _nackTimer = new System.Threading.Timer(ProcessNacks, null, 50, 50);
             _flushTimer = new System.Threading.Timer(FlushMetadata, null, 500, 500);
@@ -668,7 +767,9 @@ namespace VelocityShare.Server
                 }
                 else if ((header.Flags & 0x01) != 0) // Data packet
                 {
-                    HandleDataPacket(header, pBuffer + Marshal.SizeOf<VctpHeader>());
+                    byte[] payload = new byte[header.PayloadLen];
+                    Marshal.Copy((IntPtr)(pBuffer + Marshal.SizeOf<VctpHeader>()), payload, 0, header.PayloadLen);
+                    _decryptQueue.Add((header, payload), _cts.Token);
                 }
                 else if ((header.Flags & 0x08) != 0) // EOF
                 {
@@ -855,6 +956,8 @@ namespace VelocityShare.Server
             if (_metadata == null || _isFinished) return;
 
             int index = (int)header.BlockIndex;
+            
+            // Fast check outside lock
             if (_metadata.IsBlockCompleted(index)) return;
 
             long offset = (long)index * _blockSize;
@@ -867,7 +970,11 @@ namespace VelocityShare.Server
 
             fixed (byte* pKey = _cryptoKey, pNonce = _cryptoNonce)
             {
-                int res = VelocityShareCrypto.decrypt_block_chacha(pKey, pNonce, pCiphertext, (nuint)length, pTag);
+                byte* pBlockNonce = stackalloc byte[12];
+                for (int j = 0; j < 8; j++) pBlockNonce[j] = pNonce[j];
+                *(uint*)(pBlockNonce + 8) = (uint)index;
+
+                int res = VelocityShareCrypto.decrypt_block_chacha(pKey, pBlockNonce, pCiphertext, (nuint)length, pTag);
                 if (res != 0)
                 {
                     OnLog?.Invoke($"[VCTP Receiver] Decryption authentication failed on block {index}. Discarding.");
@@ -878,22 +985,27 @@ namespace VelocityShare.Server
             byte* pMmf = (byte*)_mmfPtr.ToPointer();
             Buffer.MemoryCopy(pCiphertext, pMmf + offset, length, length);
 
-            _metadata.MarkBlockCompleted(index);
-            _completedBlocks++;
-            _receivedIndices.Add(index);
-
-            // Efficiently detect and queue gaps
-            if (index > _highestReceivedIndex + 1)
+            lock (_stateLock)
             {
-                for (int k = _highestReceivedIndex + 1; k < index; k++)
+                if (_metadata.IsBlockCompleted(index)) return;
+
+                _metadata.MarkBlockCompleted(index);
+                _completedBlocks++;
+                _receivedIndices.Add(index);
+
+                // Efficiently detect and queue gaps
+                if (index > _highestReceivedIndex + 1)
                 {
-                    _pendingNacks.Enqueue(k);
+                    for (int k = _highestReceivedIndex + 1; k < index; k++)
+                    {
+                        _pendingNacks.Enqueue(k);
+                    }
                 }
-            }
 
-            if (index > _highestReceivedIndex)
-            {
-                _highestReceivedIndex = index;
+                if (index > _highestReceivedIndex)
+                {
+                    _highestReceivedIndex = index;
+                }
             }
 
             OnProgress?.Invoke(_completedBlocks, _totalBlocks);
@@ -1054,6 +1166,7 @@ namespace VelocityShare.Server
         public void Dispose()
         {
             _cts.Cancel();
+            _decryptQueue.Dispose();
             _nackTimer?.Dispose();
             _flushTimer?.Dispose();
             CleanupReceiverMmf();
