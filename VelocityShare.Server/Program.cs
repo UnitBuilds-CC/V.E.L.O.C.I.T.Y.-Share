@@ -505,7 +505,7 @@ app.MapGet("/api/share/test/vctp", async () =>
         // 5. Test Interruption and Resumability!
         logs.Add("--- Beginning Phase 1: Transfer with Interruption ---");
         Console.WriteLine("--- Beginning Phase 1: Transfer with Interruption ---");
-        using (var sender = new VctpSender(srcPath, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 1200.0))
+        using (var sender = new VctpSender(srcPath, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 10000.0))
         {
             sender.OnLog += (log) => { logs.Add($"[Sender] {log}"); Console.WriteLine($"[Sender] {log}"); };
             
@@ -541,7 +541,7 @@ app.MapGet("/api/share/test/vctp", async () =>
         };
 
         var resumeSw = System.Diagnostics.Stopwatch.StartNew();
-        using (var senderResume = new VctpSender(srcPath, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 1600.0))
+        using (var senderResume = new VctpSender(srcPath, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 10000.0))
         {
             senderResume.OnLog += (log) => { logs.Add($"[Sender Resume] {log}"); Console.WriteLine($"[Sender Resume] {log}"); };
             await senderResume.StartAsync();

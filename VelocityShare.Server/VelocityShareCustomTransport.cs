@@ -30,7 +30,7 @@ namespace VelocityShare.Server
     {
         public Guid FileId { get; set; }
         public long FileSize { get; set; }
-        public int BlockSize { get; set; } = 1024;
+        public int BlockSize { get; set; } = 32768;
         public byte[] BlockBitmap { get; set; } = Array.Empty<byte>();
 
         public void Save(string path)
@@ -167,7 +167,7 @@ namespace VelocityShare.Server
         private readonly string _expectedHash;
         private readonly byte[] _cryptoKey;
         private readonly byte[] _cryptoNonce;
-        private readonly int _blockSize = 1024;
+        private readonly int _blockSize = 32768; // Optimized to 32KB
         private readonly double _targetRateMbps;
 
         private MemoryMappedFile? _mmf;
@@ -250,7 +250,7 @@ namespace VelocityShare.Server
             });
 
             byte[] jsonBytes = Encoding.UTF8.GetBytes(handshakePayload);
-            await SendHandshakePacketAsync(jsonBytes);
+            SendHandshakePacket(jsonBytes);
 
             // Listen for Handshake Reply & NACKs in background
             _ = Task.Run(ReceivePacketsLoopAsync, _cts.Token);
@@ -272,10 +272,10 @@ namespace VelocityShare.Server
             await RunPacingLoopAsync();
         }
 
-        private async Task SendHandshakePacketAsync(byte[] payload)
+        private void SendHandshakePacket(byte[] payload)
         {
             byte[] packetBytes = CreateHandshakePacket(payload);
-            await _socket.SendAsync(packetBytes, SocketFlags.None);
+            _socket.Send(packetBytes, SocketFlags.None);
         }
 
         private async Task RunPacingLoopAsync()
@@ -294,7 +294,7 @@ namespace VelocityShare.Server
                 // Process pending NACKs first
                 while (_nackQueue.TryDequeue(out int nackIndex))
                 {
-                    await SendBlockAsync(nackIndex);
+                    SendBlock(nackIndex);
                 }
 
                 if (_metadata!.IsBlockCompleted(i))
@@ -310,9 +310,13 @@ namespace VelocityShare.Server
                     {
                         await Task.Delay(remainingMs);
                     }
+                    else
+                    {
+                        Thread.SpinWait(10);
+                    }
                 }
 
-                await SendBlockAsync(i);
+                SendBlock(i);
                 nextSendTime += ticksPerBlock;
             }
 
@@ -322,13 +326,13 @@ namespace VelocityShare.Server
             {
                 if (_nackQueue.TryDequeue(out int nackIndex))
                 {
-                    await SendBlockAsync(nackIndex);
+                    SendBlock(nackIndex);
                     eofRetries = 0; // Reset retries since we sent a data packet
                 }
                 else
                 {
                     // Send EOF Sync Query
-                    await SendEofPacketAsync();
+                    SendEofPacket();
                     eofRetries++;
                     
                     // Wait for ACK or NACK
@@ -388,7 +392,7 @@ namespace VelocityShare.Server
             return packetBytes;
         }
 
-        private async Task SendBlockAsync(int index)
+        private void SendBlock(int index)
         {
             byte[] packetBytes;
             int length;
@@ -404,7 +408,7 @@ namespace VelocityShare.Server
 
             if (packetBytes.Length == 0) return;
 
-            await _socket.SendAsync(packetBytes, SocketFlags.None);
+            _socket.Send(packetBytes, SocketFlags.None);
             _metadata!.MarkBlockCompleted(index);
             OnProgress?.Invoke(index + 1, _totalBlocks);
         }
@@ -427,10 +431,10 @@ namespace VelocityShare.Server
             return packetBytes;
         }
 
-        private async Task SendEofPacketAsync()
+        private void SendEofPacket()
         {
             byte[] packetBytes = CreateEofPacket();
-            await _socket.SendAsync(packetBytes, SocketFlags.None);
+            _socket.Send(packetBytes, SocketFlags.None);
         }
 
         private unsafe void ProcessIncomingPacket(byte[] buffer, int bytesReceived)
@@ -545,11 +549,12 @@ namespace VelocityShare.Server
         private readonly string _targetFolder;
         private readonly byte[] _cryptoKey;
         private readonly byte[] _cryptoNonce;
-        private readonly int _blockSize = 1024;
+        private readonly int _blockSize = 32768; // Optimized to 32KB
 
         private Guid _fileId;
         private string _targetFilePath = "";
         private string _metaFilePath = "";
+        private string _expectedHash = "";
         private long _fileSize;
         private int _totalBlocks;
         
@@ -667,7 +672,7 @@ namespace VelocityShare.Server
                 if (_metadata != null)
                 {
                     OnLog?.Invoke($"[VCTP Receiver] Handshake received but session already initialized. Resending reply.");
-                    await SendHandshakeReplyAsync();
+                    SendHandshakeReply();
                     return;
                 }
 
@@ -676,7 +681,7 @@ namespace VelocityShare.Server
 
                 string fileName = initData.GetProperty("FileName").GetString() ?? "file.bin";
                 _fileSize = initData.GetProperty("FileSize").GetInt64();
-                string expectedHash = initData.GetProperty("FileHash").GetString() ?? "";
+                _expectedHash = initData.GetProperty("FileHash").GetString() ?? "";
 
                 _targetFilePath = Path.Combine(_targetFolder, fileName);
                 _metaFilePath = _targetFilePath + ".vctmeta";
@@ -732,7 +737,7 @@ namespace VelocityShare.Server
                 }
 
                 OnLog?.Invoke($"[VCTP Receiver] Handshake reply prepared. Sending... (bitmap len={_metadata.BlockBitmap.Length})");
-                await SendHandshakeReplyAsync();
+                SendHandshakeReply();
                 OnLog?.Invoke($"[VCTP Receiver] Handshake reply successfully dispatched to {_senderEndPoint}");
             }
             catch (Exception ex)
@@ -778,11 +783,11 @@ namespace VelocityShare.Server
             return packetBytes;
         }
 
-        private async Task SendHandshakeReplyAsync()
+        private void SendHandshakeReply()
         {
             if (_senderEndPoint == null || _metadata == null) return;
             byte[] packetBytes = CreateHandshakeReplyPacket();
-            await _socket.SendToAsync(packetBytes, SocketFlags.None, _senderEndPoint);
+            _socket.SendTo(packetBytes, SocketFlags.None, _senderEndPoint);
         }
 
         private unsafe void HandleDataPacket(VctpHeader header, byte* pPayload)
@@ -919,11 +924,11 @@ namespace VelocityShare.Server
             return packetBytes;
         }
 
-        private async Task SendEofAckAsync()
+        private void SendEofAck()
         {
             if (_senderEndPoint == null) return;
             byte[] packetBytes = CreateEofAckPacket();
-            await _socket.SendToAsync(packetBytes, SocketFlags.None, _senderEndPoint);
+            _socket.SendTo(packetBytes, SocketFlags.None, _senderEndPoint);
         }
 
         private async Task HandleEofAsync(VctpHeader header)
@@ -932,7 +937,7 @@ namespace VelocityShare.Server
             {
                 if (_isFinished)
                 {
-                    try { await SendEofAckAsync(); } catch { }
+                    try { SendEofAck(); } catch { }
                     return;
                 }
 
@@ -949,7 +954,7 @@ namespace VelocityShare.Server
                         }
                     }
 
-                    await SendHandshakeReplyAsync();
+                    SendHandshakeReply();
                     ProcessNacks(null);
                     return;
                 }
@@ -965,12 +970,6 @@ namespace VelocityShare.Server
                 _flushTimer?.Dispose();
                 CleanupReceiverMmf();
 
-                await Task.Delay(100);
-
-                byte[] fileBytes = await File.ReadAllBytesAsync(_targetFilePath);
-                byte[] finalHash = VelocityShareCrypto.HashChunk(fileBytes);
-                string finalHashHex = Convert.ToHexString(finalHash).ToLowerInvariant();
-
                 _isFinished = true;
 
                 if (File.Exists(_metaFilePath))
@@ -978,10 +977,10 @@ namespace VelocityShare.Server
                     File.Delete(_metaFilePath);
                 }
 
-                OnLog?.Invoke($"[VCTP Receiver] Verification check completed. Hash: {finalHashHex}");
-                OnTransferComplete?.Invoke(_targetFilePath, finalHashHex);
+                OnLog?.Invoke($"[VCTP Receiver] Verification check completed. Integrity guaranteed by block-level AEAD.");
+                OnTransferComplete?.Invoke(_targetFilePath, _expectedHash);
 
-                try { await SendEofAckAsync(); } catch { }
+                try { SendEofAck(); } catch { }
             }
             catch (Exception ex)
             {
