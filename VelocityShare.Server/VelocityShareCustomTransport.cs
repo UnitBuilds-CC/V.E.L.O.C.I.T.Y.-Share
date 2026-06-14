@@ -349,6 +349,7 @@ namespace VelocityShare.Server
                 })
                 {
                     IsBackground = true,
+                    Priority = ThreadPriority.AboveNormal,
                     Name = $"VCTP-Encryptor-{w}"
                 };
                 thread.Start();
@@ -733,6 +734,7 @@ namespace VelocityShare.Server
                 })
                 {
                     IsBackground = true,
+                    Priority = ThreadPriority.AboveNormal,
                     Name = $"VCTP-Decryptor-{i}"
                 };
                 thread.Start();
