@@ -22,7 +22,7 @@
                         <Label Text="Sync Profile Configuration" TextColor="#ffffff" FontSize="16" FontAttributes="Bold"/>
                         
                         <Label Text="Server URL" TextColor="#9ca3af" FontSize="12" Margin="0,5,0,0"/>
-                        <Entry x:Name="ServerUrlEntry" Text="http://localhost:5077" TextColor="#ffffff" BackgroundColor="#000000" Margin="0,2,0,0"/>
+                        <Entry x:Name="ServerUrlEntry" Text="https://share.unitbuilds.com" TextColor="#ffffff" BackgroundColor="#000000" Margin="0,2,0,0"/>
 
                         <Label Text="Local Path to Sync" TextColor="#9ca3af" FontSize="12" Margin="0,5,0,0"/>
                         <Entry x:Name="LocalPathEntry" Text="" TextColor="#ffffff" BackgroundColor="#000000" Margin="0,2,0,0"/>
