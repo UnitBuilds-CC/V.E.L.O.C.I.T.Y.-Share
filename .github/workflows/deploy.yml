@@ -1,0 +1,40 @@
+name: Deploy VelocityShare Server
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Compress Server Source Files
+        run: |
+          tar --exclude="**/bin" --exclude="**/obj" --exclude="**/target" -czf share.tar.gz VelocityShare.Server velocity_share_ffi Dockerfile
+
+      - name: Copy Tarball to Azure VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 51.105.215.110
+          username: azureuser
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "share.tar.gz"
+          target: "/home/azureuser/"
+
+      - name: Extract and Build Container on VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 51.105.215.110
+          username: azureuser
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/azureuser
+            mkdir -p VelocityShare
+            tar -xzf share.tar.gz -C VelocityShare/
+            rm share.tar.gz
+            sudo docker compose up -d --build velocity-share-server
