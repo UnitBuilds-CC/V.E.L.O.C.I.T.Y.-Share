@@ -22,3 +22,6 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# Publish folder
+/[Pp]ublish/

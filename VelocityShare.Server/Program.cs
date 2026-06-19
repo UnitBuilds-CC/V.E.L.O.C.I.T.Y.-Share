@@ -46,6 +46,7 @@ dropsiteConfig["type"] = "local_nas";
 dropsiteConfig["path"] = defaultUploadsDir;
 
 FileSyncEngine? activeSyncEngine = null;
+var activeReceivers = new ConcurrentDictionary<Guid, VctpReceiver>();
 
 // POST /api/share/sync/start: Starts the directory sync engine watching a local folder path
 app.MapPost("/api/share/sync/start", async (HttpContext context) =>
@@ -165,21 +166,91 @@ app.Map("/ws/share", async (HttpContext context) =>
                         string innerData = msgDoc.RootElement.GetProperty("data").GetString() ?? "";
                         var innerDoc = JsonDocument.Parse(innerData);
                         string syncType = innerDoc.RootElement.GetProperty("type").GetString() ?? "";
-                        string file = innerDoc.RootElement.GetProperty("file").GetString() ?? "";
-                        string hash = innerDoc.RootElement.TryGetProperty("hash", out var hashProp) ? hashProp.GetString() ?? "" : "";
-                        byte[]? contentBytes = null;
-                        if (innerDoc.RootElement.TryGetProperty("content", out var contentProp))
+                        
+                        if (syncType == "sync_vctp_offer")
                         {
-                            string base64Content = contentProp.GetString() ?? "";
-                            if (!string.IsNullOrEmpty(base64Content))
+                            string file = innerDoc.RootElement.GetProperty("file").GetString() ?? "";
+                            string hash = innerDoc.RootElement.GetProperty("hash").GetString() ?? "";
+                            Guid fileId = innerDoc.RootElement.GetProperty("fileId").GetGuid();
+                            byte[] key = Convert.FromBase64String(innerDoc.RootElement.GetProperty("key").GetString() ?? "");
+                            byte[] nonce = Convert.FromBase64String(innerDoc.RootElement.GetProperty("nonce").GetString() ?? "");
+
+                            string syncFolder = activeSyncEngine.SyncFolderPath;
+                            string targetDir = Path.GetDirectoryName(Path.Combine(syncFolder, file)) ?? syncFolder;
+
+                            var receiver = new VctpReceiver(targetDir, key, nonce, port: 0);
+                            activeReceivers[fileId] = receiver;
+
+                            receiver.OnTransferComplete += (filePath, fileHash) =>
                             {
-                                contentBytes = Convert.FromBase64String(base64Content);
+                                activeSyncEngine.ConfirmRemoteSyncCompleted(file, fileHash);
+                                receiver.Dispose();
+                                activeReceivers.TryRemove(fileId, out _);
+                                Console.WriteLine($"[Sync Engine] VCTP sync receiver complete for {file}");
+                            };
+                            receiver.Start();
+
+                            string senderPeer = msgDoc.RootElement.GetProperty("sender").GetString() ?? "";
+                            var acceptPayload = JsonSerializer.Serialize(new
+                            {
+                                type = "folder_sync_payload",
+                                sender = "local_sync_engine",
+                                target = senderPeer,
+                                data = JsonSerializer.Serialize(new
+                                {
+                                    type = "sync_vctp_accept",
+                                    fileId = fileId,
+                                    port = receiver.Port
+                                })
+                            });
+
+                            if (activePeers.TryGetValue(senderPeer, out var senderSocket) && senderSocket.State == WebSocketState.Open)
+                            {
+                                await senderSocket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(acceptPayload)), WebSocketMessageType.Text, true, CancellationToken.None);
+                                Console.WriteLine($"[Sync Engine] Dispatched sync_vctp_accept back to peer {senderPeer} on port {receiver.Port}");
                             }
                         }
+                        else if (syncType == "sync_vctp_accept")
+                        {
+                            Guid fileId = innerDoc.RootElement.GetProperty("fileId").GetGuid();
+                            int port = innerDoc.RootElement.GetProperty("port").GetInt32();
 
-                        // Apply the remote change locally
-                        await activeSyncEngine.ApplyRemoteSyncAsync(syncType, file, hash, contentBytes);
-                        Console.WriteLine($"[Sync Engine] Applied remote {syncType} for file {file}");
+                            if (activeSyncEngine.ActiveSyncTransfers.TryRemove(fileId, out var senderInfo))
+                            {
+                                var (key, nonce, fullPath, fileHash) = senderInfo;
+                                var remoteEP = new IPEndPoint(IPAddress.Loopback, port);
+                                _ = Task.Run(async () =>
+                                {
+                                    try
+                                    {
+                                        using var vctpSender = new VctpSender(fullPath, fileId, fileHash, remoteEP, key, nonce, targetRateMbps: 1000.0);
+                                        await vctpSender.StartAsync();
+                                        Console.WriteLine($"[Sync Engine] VCTP sync sender complete for {fullPath}");
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"[Sync Engine] VCTP sync sender failed: {ex.Message}");
+                                    }
+                                });
+                            }
+                        }
+                        else
+                        {
+                            string file = innerDoc.RootElement.GetProperty("file").GetString() ?? "";
+                            string hash = innerDoc.RootElement.TryGetProperty("hash", out var hashProp) ? hashProp.GetString() ?? "" : "";
+                            byte[]? contentBytes = null;
+                            if (innerDoc.RootElement.TryGetProperty("content", out var contentProp))
+                            {
+                                string base64Content = contentProp.GetString() ?? "";
+                                if (!string.IsNullOrEmpty(base64Content))
+                                {
+                                    contentBytes = Convert.FromBase64String(base64Content);
+                                }
+                            }
+
+                            await activeSyncEngine.ApplyRemoteSyncAsync(syncType, file, hash, contentBytes);
+                            Console.WriteLine($"[Sync Engine] Applied remote {syncType} for file {file}");
+                        }
                     }
 
                     string target = msgDoc.RootElement.TryGetProperty("target", out var targetProp) ? targetProp.GetString() ?? "" : "";
@@ -505,7 +576,7 @@ app.MapGet("/api/share/test/vctp", async () =>
         // 5. Test Interruption and Resumability!
         logs.Add("--- Beginning Phase 1: Transfer with Interruption ---");
         Console.WriteLine("--- Beginning Phase 1: Transfer with Interruption ---");
-        using (var sender = new VctpSender(srcPath, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 10000.0))
+        using (var sender = new VctpSender(srcPath, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 50.0))
         {
             sender.OnLog += (log) => { logs.Add($"[Sender] {log}"); Console.WriteLine($"[Sender] {log}"); };
             
@@ -643,6 +714,711 @@ app.MapGet("/api/share/test/vctp/benchmark", async () =>
         // 2. Create in-memory destination MMF
         using var destMmf = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateNew(null, fileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.ReadWrite);
 
+        // Warm up the ThreadPool
+        Parallel.For(0, Environment.ProcessorCount, i => { });
+
+        // Create the views that will be passed directly to VctpReceiver and VctpSender
+        using var srcAccessor = srcMmf.CreateViewAccessor(0, fileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
+        using var destAccessor = destMmf.CreateViewAccessor(0, fileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.ReadWrite);
+
+        // Pre-touch / Warm the destination memory pages to allocate physical RAM and avoid page faults during the benchmark!
+        unsafe
+        {
+            byte* pDest = null;
+            destAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pDest);
+            try
+            {
+                int warmingWorkers = 6; // Matching the 6 P-cores
+                long warmingChunk = fileSize / warmingWorkers;
+                Parallel.For(0, warmingWorkers, w =>
+                {
+                    long start = w * warmingChunk;
+                    long end = (w == warmingWorkers - 1) ? fileSize : start + warmingChunk;
+                    for (long offset = start; offset < end; offset += 4096)
+                    {
+                        pDest[offset] = 0;
+                    }
+                });
+            }
+            finally
+            {
+                destAccessor.SafeMemoryMappedViewHandle.ReleasePointer();
+            }
+        }
+
+        // Warm the source pages too to ensure physical allocation and TLB caching
+        unsafe
+        {
+            byte* pSrc = null;
+            srcAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pSrc);
+            try
+            {
+                int warmingWorkers = 6; // Matching the 6 P-cores
+                long warmingChunk = fileSize / warmingWorkers;
+                Parallel.For(0, warmingWorkers, w =>
+                {
+                    long start = w * warmingChunk;
+                    long end = (w == warmingWorkers - 1) ? fileSize : start + warmingChunk;
+                    byte sum = 0;
+                    for (long offset = start; offset < end; offset += 4096)
+                    {
+                        sum ^= pSrc[offset];
+                    }
+                    if (sum == 42) GC.KeepAlive(sum);
+                });
+            }
+            finally
+            {
+                srcAccessor.SafeMemoryMappedViewHandle.ReleasePointer();
+            }
+        }
+
+        // --- Dynamic Sweep Benchmark ---
+        var sweepResults = new List<object>();
+        double bestReadSpeed = 0, bestWriteSpeed = 0, bestCopySpeed = 0;
+        int bestReadWorkers = 6, bestWriteWorkers = 6, bestCopyWorkers = 6;
+        string bestReadAff = "p_cores", bestWriteAff = "p_cores", bestCopyAff = "p_cores";
+        string bestReadPart = "dynamic", bestWritePart = "dynamic", bestCopyPart = "dynamic";
+        int bestReadUnroll = 8, bestWriteUnroll = 8, bestCopyUnroll = 8;
+
+        unsafe
+        {
+            byte* pSrc = null;
+            byte* pDest = null;
+            srcAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pSrc);
+            destAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pDest);
+            try
+            {
+                // Local function to pin thread
+                IntPtr PinThread(int workerId, string affinityMode, int maxWorkers)
+                {
+                    int coreIndex = -1;
+                    if (affinityMode == "p_cores")
+                    {
+                        coreIndex = (workerId % 6) * 2;
+                    }
+                    else if (affinityMode == "physical")
+                    {
+                        if (workerId < 6) coreIndex = workerId * 2;
+                        else coreIndex = 12 + ((workerId - 6) % 4);
+                    }
+                    else if (affinityMode == "all")
+                    {
+                        coreIndex = workerId % 16;
+                    }
+                    
+                    if (coreIndex >= 0)
+                    {
+                        return VelocityShare.Server.ThreadAffinityHelper.PinToCore(coreIndex);
+                    }
+                    return IntPtr.Zero;
+                }
+
+                // Local function to measure isolated read
+                double MeasureRead(int workerCount, string affinityMode, string partitioningMode, int unroll)
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    if (partitioningMode == "static")
+                    {
+                        Task[] tasks = new Task[workerCount];
+                        long partSize = fileSize / workerCount;
+                        partSize = (partSize / 4096) * 4096;
+                        for (int t = 0; t < workerCount; t++)
+                        {
+                            int workerId = t;
+                            long start = workerId * partSize;
+                            long length = (workerId == workerCount - 1) ? (fileSize - start) : partSize;
+                            tasks[workerId] = Task.Run(() =>
+                            {
+                                var prevAffinity = PinThread(workerId, affinityMode, workerCount);
+                                try
+                                {
+                                    if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+                                    {
+                                        var sumVec0 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                        var sumVec1 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                        var sumVec2 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                        var sumVec3 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                        var sumVec4 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                        var sumVec5 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                        var sumVec6 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                        var sumVec7 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                        
+                                        long step = unroll == 8 ? 256 : 128;
+                                        long limit = length - (length % step);
+                                        byte* pSrcOffset = pSrc + start;
+                                        
+                                        if (unroll == 8)
+                                        {
+                                            for (long offset = 0; offset < limit; offset += step)
+                                            {
+                                                sumVec0 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 0));
+                                                sumVec1 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 32));
+                                                sumVec2 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 64));
+                                                sumVec3 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 96));
+                                                sumVec4 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 128));
+                                                sumVec5 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 160));
+                                                sumVec6 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 192));
+                                                sumVec7 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 224));
+                                            }
+                                            var sumVec = sumVec0 ^ sumVec1 ^ sumVec2 ^ sumVec3 ^ sumVec4 ^ sumVec5 ^ sumVec6 ^ sumVec7;
+                                            long sum = sumVec[0] ^ sumVec[1] ^ sumVec[2] ^ sumVec[3];
+                                            for (long offset = limit; offset < length; offset += 8)
+                                            {
+                                                sum ^= *(long*)(pSrcOffset + offset);
+                                            }
+                                            if (sum == 0xDEADBEEF) GC.KeepAlive(sum);
+                                        }
+                                        else
+                                        {
+                                            for (long offset = 0; offset < limit; offset += step)
+                                            {
+                                                sumVec0 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 0));
+                                                sumVec1 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 32));
+                                                sumVec2 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 64));
+                                                sumVec3 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 96));
+                                            }
+                                            var sumVec = sumVec0 ^ sumVec1 ^ sumVec2 ^ sumVec3;
+                                            long sum = sumVec[0] ^ sumVec[1] ^ sumVec[2] ^ sumVec[3];
+                                            for (long offset = limit; offset < length; offset += 8)
+                                            {
+                                                sum ^= *(long*)(pSrcOffset + offset);
+                                            }
+                                            if (sum == 0xDEADBEEF) GC.KeepAlive(sum);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        long* pLong = (long*)(pSrc + start);
+                                        long count = length / 8;
+                                        long sum = 0;
+                                        for (long i = 0; i < count; i++)
+                                        {
+                                            sum ^= pLong[i];
+                                        }
+                                        if (sum == 0xDEADBEEF) GC.KeepAlive(sum);
+                                    }
+                                }
+                                finally
+                                {
+                                    VelocityShare.Server.ThreadAffinityHelper.RestoreAffinity(prevAffinity);
+                                }
+                            });
+                        }
+                        Task.WaitAll(tasks);
+                    }
+                    else // dynamic
+                    {
+                        long nextBlockIndex = 0;
+                        long blockSize = 1024 * 1024; // 1MB blocks
+                        Task[] tasks = new Task[workerCount];
+                        for (int t = 0; t < workerCount; t++)
+                        {
+                            int workerId = t;
+                            tasks[workerId] = Task.Run(() =>
+                            {
+                                var prevAffinity = PinThread(workerId, affinityMode, workerCount);
+                                try
+                                {
+                                    while (true)
+                                    {
+                                        long blockIdx = Interlocked.Increment(ref nextBlockIndex) - 1;
+                                        long start = blockIdx * blockSize;
+                                        if (start >= fileSize) break;
+                                        long length = Math.Min(blockSize, fileSize - start);
+                                        
+                                        if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+                                        {
+                                            var sumVec0 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                            var sumVec1 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                            var sumVec2 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                            var sumVec3 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                            var sumVec4 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                            var sumVec5 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                            var sumVec6 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                            var sumVec7 = System.Runtime.Intrinsics.Vector256<long>.Zero;
+                                            
+                                            long step = unroll == 8 ? 256 : 128;
+                                            long limit = length - (length % step);
+                                            byte* pSrcOffset = pSrc + start;
+                                            
+                                            if (unroll == 8)
+                                            {
+                                                for (long offset = 0; offset < limit; offset += step)
+                                                {
+                                                    sumVec0 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 0));
+                                                    sumVec1 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 32));
+                                                    sumVec2 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 64));
+                                                    sumVec3 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 96));
+                                                    sumVec4 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 128));
+                                                    sumVec5 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 160));
+                                                    sumVec6 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 192));
+                                                    sumVec7 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 224));
+                                                }
+                                                var sumVec = sumVec0 ^ sumVec1 ^ sumVec2 ^ sumVec3 ^ sumVec4 ^ sumVec5 ^ sumVec6 ^ sumVec7;
+                                                long sum = sumVec[0] ^ sumVec[1] ^ sumVec[2] ^ sumVec[3];
+                                                for (long offset = limit; offset < length; offset += 8)
+                                                {
+                                                    sum ^= *(long*)(pSrcOffset + offset);
+                                                }
+                                                if (sum == 0xDEADBEEF) GC.KeepAlive(sum);
+                                            }
+                                            else
+                                            {
+                                                for (long offset = 0; offset < limit; offset += step)
+                                                {
+                                                    sumVec0 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 0));
+                                                    sumVec1 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 32));
+                                                    sumVec2 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 64));
+                                                    sumVec3 ^= System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 96));
+                                                }
+                                                var sumVec = sumVec0 ^ sumVec1 ^ sumVec2 ^ sumVec3;
+                                                long sum = sumVec[0] ^ sumVec[1] ^ sumVec[2] ^ sumVec[3];
+                                                for (long offset = limit; offset < length; offset += 8)
+                                                {
+                                                    sum ^= *(long*)(pSrcOffset + offset);
+                                                }
+                                                if (sum == 0xDEADBEEF) GC.KeepAlive(sum);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            long* pLong = (long*)(pSrc + start);
+                                            long count = length / 8;
+                                            long sum = 0;
+                                            for (long i = 0; i < count; i++)
+                                            {
+                                                sum ^= pLong[i];
+                                            }
+                                            if (sum == 0xDEADBEEF) GC.KeepAlive(sum);
+                                        }
+                                    }
+                                }
+                                finally
+                                {
+                                    VelocityShare.Server.ThreadAffinityHelper.RestoreAffinity(prevAffinity);
+                                }
+                            });
+                        }
+                        Task.WaitAll(tasks);
+                    }
+                    sw.Stop();
+                    return sw.Elapsed.TotalSeconds;
+                }
+
+                // Local function to measure isolated write
+                double MeasureWrite(int workerCount, string affinityMode, string partitioningMode, int unroll)
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    if (partitioningMode == "static")
+                    {
+                        Task[] tasks = new Task[workerCount];
+                        long partSize = fileSize / workerCount;
+                        partSize = (partSize / 4096) * 4096;
+                        for (int t = 0; t < workerCount; t++)
+                        {
+                            int workerId = t;
+                            long start = workerId * partSize;
+                            long length = (workerId == workerCount - 1) ? (fileSize - start) : partSize;
+                            tasks[workerId] = Task.Run(() =>
+                            {
+                                var prevAffinity = PinThread(workerId, affinityMode, workerCount);
+                                try
+                                {
+                                    if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+                                    {
+                                        var valVec = System.Runtime.Intrinsics.Vector256.Create(0x5555555555555555);
+                                        long step = unroll == 8 ? 256 : 128;
+                                        long limit = length - (length % step);
+                                        byte* pDestOffset = pDest + start;
+                                        
+                                        if (unroll == 8)
+                                        {
+                                            for (long offset = 0; offset < limit; offset += step)
+                                            {
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 0), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 32), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 64), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 96), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 128), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 160), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 192), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 224), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                            }
+                                        }
+                                        else
+                                        {
+                                            for (long offset = 0; offset < limit; offset += step)
+                                            {
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 0), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 32), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 64), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 96), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                            }
+                                        }
+                                        for (long offset = limit; offset < length; offset += 8)
+                                        {
+                                            *(long*)(pDestOffset + offset) = 0x5555555555555555;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        long* pLong = (long*)(pDest + start);
+                                        long count = length / 8;
+                                        for (long i = 0; i < count; i++)
+                                        {
+                                            pLong[i] = 0x5555555555555555;
+                                        }
+                                    }
+                                }
+                                finally
+                                {
+                                    VelocityShare.Server.ThreadAffinityHelper.RestoreAffinity(prevAffinity);
+                                }
+                            });
+                        }
+                        Task.WaitAll(tasks);
+                    }
+                    else // dynamic
+                    {
+                        long nextBlockIndex = 0;
+                        long blockSize = 1024 * 1024; // 1MB blocks
+                        Task[] tasks = new Task[workerCount];
+                        for (int t = 0; t < workerCount; t++)
+                        {
+                            int workerId = t;
+                            tasks[workerId] = Task.Run(() =>
+                            {
+                                var prevAffinity = PinThread(workerId, affinityMode, workerCount);
+                                try
+                                {
+                                    while (true)
+                                    {
+                                        long blockIdx = Interlocked.Increment(ref nextBlockIndex) - 1;
+                                        long start = blockIdx * blockSize;
+                                        if (start >= fileSize) break;
+                                        long length = Math.Min(blockSize, fileSize - start);
+                                        
+                                        if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+                                        {
+                                            var valVec = System.Runtime.Intrinsics.Vector256.Create(0x5555555555555555);
+                                            long step = unroll == 8 ? 256 : 128;
+                                            long limit = length - (length % step);
+                                            byte* pDestOffset = pDest + start;
+                                            
+                                            if (unroll == 8)
+                                            {
+                                                for (long offset = 0; offset < limit; offset += step)
+                                                {
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 0), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 32), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 64), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 96), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 128), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 160), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 192), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 224), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                }
+                                            }
+                                            else
+                                            {
+                                                for (long offset = 0; offset < limit; offset += step)
+                                                {
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 0), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 32), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 64), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 96), System.Runtime.Intrinsics.Vector256.AsDouble(valVec));
+                                                }
+                                            }
+                                            for (long offset = limit; offset < length; offset += 8)
+                                            {
+                                                *(long*)(pDestOffset + offset) = 0x5555555555555555;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            long* pLong = (long*)(pDest + start);
+                                            long count = length / 8;
+                                            for (long i = 0; i < count; i++)
+                                            {
+                                                pLong[i] = 0x5555555555555555;
+                                            }
+                                        }
+                                    }
+                                }
+                                finally
+                                {
+                                    VelocityShare.Server.ThreadAffinityHelper.RestoreAffinity(prevAffinity);
+                                }
+                            });
+                        }
+                        Task.WaitAll(tasks);
+                    }
+                    sw.Stop();
+                    return sw.Elapsed.TotalSeconds;
+                }
+
+                // Local function to measure combined copy
+                double MeasureCopy(int workerCount, string affinityMode, string partitioningMode, int unroll)
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    if (partitioningMode == "static")
+                    {
+                        Task[] tasks = new Task[workerCount];
+                        long partSize = fileSize / workerCount;
+                        partSize = (partSize / 4096) * 4096;
+                        for (int t = 0; t < workerCount; t++)
+                        {
+                            int workerId = t;
+                            long start = workerId * partSize;
+                            long length = (workerId == workerCount - 1) ? (fileSize - start) : partSize;
+                            tasks[workerId] = Task.Run(() =>
+                            {
+                                var prevAffinity = PinThread(workerId, affinityMode, workerCount);
+                                try
+                                {
+                                    if (System.Runtime.Intrinsics.X86.Avx2.IsSupported && length >= 256)
+                                    {
+                                        long step = unroll == 8 ? 256 : 128;
+                                        long limit = length - (length % step);
+                                        byte* pSrcOffset = pSrc + start;
+                                        byte* pDestOffset = pDest + start;
+                                        
+                                        if (unroll == 8)
+                                        {
+                                            for (long offset = 0; offset < limit; offset += step)
+                                            {
+                                                var temp0 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 0));
+                                                var temp1 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 32));
+                                                var temp2 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 64));
+                                                var temp3 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 96));
+                                                var temp4 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 128));
+                                                var temp5 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 160));
+                                                var temp6 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 192));
+                                                var temp7 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 224));
+                                                
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 0), System.Runtime.Intrinsics.Vector256.AsDouble(temp0));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 32), System.Runtime.Intrinsics.Vector256.AsDouble(temp1));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 64), System.Runtime.Intrinsics.Vector256.AsDouble(temp2));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 96), System.Runtime.Intrinsics.Vector256.AsDouble(temp3));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 128), System.Runtime.Intrinsics.Vector256.AsDouble(temp4));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 160), System.Runtime.Intrinsics.Vector256.AsDouble(temp5));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 192), System.Runtime.Intrinsics.Vector256.AsDouble(temp6));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 224), System.Runtime.Intrinsics.Vector256.AsDouble(temp7));
+                                            }
+                                        }
+                                        else
+                                        {
+                                            for (long offset = 0; offset < limit; offset += step)
+                                            {
+                                                var temp0 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 0));
+                                                var temp1 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 32));
+                                                var temp2 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 64));
+                                                var temp3 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 96));
+                                                
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 0), System.Runtime.Intrinsics.Vector256.AsDouble(temp0));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 32), System.Runtime.Intrinsics.Vector256.AsDouble(temp1));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 64), System.Runtime.Intrinsics.Vector256.AsDouble(temp2));
+                                                System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 96), System.Runtime.Intrinsics.Vector256.AsDouble(temp3));
+                                            }
+                                        }
+                                        if (length > limit)
+                                        {
+                                            Buffer.MemoryCopy(pSrcOffset + limit, pDestOffset + limit, length - limit, length - limit);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        Buffer.MemoryCopy(pSrc + start, pDest + start, length, length);
+                                    }
+                                }
+                                finally
+                                {
+                                    VelocityShare.Server.ThreadAffinityHelper.RestoreAffinity(prevAffinity);
+                                }
+                            });
+                        }
+                        Task.WaitAll(tasks);
+                    }
+                    else // dynamic
+                    {
+                        long nextBlockIndex = 0;
+                        long blockSize = 1024 * 1024; // 1MB blocks
+                        Task[] tasks = new Task[workerCount];
+                        for (int t = 0; t < workerCount; t++)
+                        {
+                            int workerId = t;
+                            tasks[workerId] = Task.Run(() =>
+                            {
+                                var prevAffinity = PinThread(workerId, affinityMode, workerCount);
+                                try
+                                {
+                                    while (true)
+                                    {
+                                        long blockIdx = Interlocked.Increment(ref nextBlockIndex) - 1;
+                                        long start = blockIdx * blockSize;
+                                        if (start >= fileSize) break;
+                                        long length = Math.Min(blockSize, fileSize - start);
+                                        
+                                        if (System.Runtime.Intrinsics.X86.Avx2.IsSupported && length >= 256)
+                                        {
+                                            long step = unroll == 8 ? 256 : 128;
+                                            long limit = length - (length % step);
+                                            byte* pSrcOffset = pSrc + start;
+                                            byte* pDestOffset = pDest + start;
+                                            
+                                            if (unroll == 8)
+                                            {
+                                                for (long offset = 0; offset < limit; offset += step)
+                                                {
+                                                    var temp0 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 0));
+                                                    var temp1 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 32));
+                                                    var temp2 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 64));
+                                                    var temp3 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 96));
+                                                    var temp4 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 128));
+                                                    var temp5 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 160));
+                                                    var temp6 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 192));
+                                                    var temp7 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 224));
+                                                    
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 0), System.Runtime.Intrinsics.Vector256.AsDouble(temp0));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 32), System.Runtime.Intrinsics.Vector256.AsDouble(temp1));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 64), System.Runtime.Intrinsics.Vector256.AsDouble(temp2));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 96), System.Runtime.Intrinsics.Vector256.AsDouble(temp3));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 128), System.Runtime.Intrinsics.Vector256.AsDouble(temp4));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 160), System.Runtime.Intrinsics.Vector256.AsDouble(temp5));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 192), System.Runtime.Intrinsics.Vector256.AsDouble(temp6));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 224), System.Runtime.Intrinsics.Vector256.AsDouble(temp7));
+                                                }
+                                            }
+                                            else
+                                            {
+                                                for (long offset = 0; offset < limit; offset += step)
+                                                {
+                                                    var temp0 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 0));
+                                                    var temp1 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 32));
+                                                    var temp2 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 64));
+                                                    var temp3 = System.Runtime.Intrinsics.Vector256.LoadAligned((long*)(pSrcOffset + offset + 96));
+                                                    
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 0), System.Runtime.Intrinsics.Vector256.AsDouble(temp0));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 32), System.Runtime.Intrinsics.Vector256.AsDouble(temp1));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 64), System.Runtime.Intrinsics.Vector256.AsDouble(temp2));
+                                                    System.Runtime.Intrinsics.X86.Avx.StoreAlignedNonTemporal((double*)(pDestOffset + offset + 96), System.Runtime.Intrinsics.Vector256.AsDouble(temp3));
+                                                }
+                                            }
+                                            if (length > limit)
+                                            {
+                                                Buffer.MemoryCopy(pSrcOffset + limit, pDestOffset + limit, length - limit, length - limit);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            Buffer.MemoryCopy(pSrc + start, pDest + start, length, length);
+                                        }
+                                    }
+                                }
+                                finally
+                                {
+                                    ThreadAffinityHelper.RestoreAffinity(prevAffinity);
+                                }
+                            });
+                        }
+                        Task.WaitAll(tasks);
+                    }
+                    sw.Stop();
+                    return sw.Elapsed.TotalSeconds;
+                }
+
+                // Run the diagnostic sweep!
+                int[] testWorkerCounts = { 2, 4, 6, 8, 10, 12, 16 };
+                string[] testAffinityModes = { "no_pinning", "p_cores", "physical", "all" };
+                string[] testPartitioningModes = { "static", "dynamic" };
+                int[] testUnrolls = { 4, 8 };
+
+                // Let's run a quick dry run to warm the JIT compiler!
+                MeasureRead(6, "p_cores", "dynamic", 8);
+                MeasureWrite(6, "p_cores", "dynamic", 8);
+                MeasureCopy(6, "p_cores", "dynamic", 8);
+
+                foreach (var workers in testWorkerCounts)
+                {
+                    foreach (var affinity in testAffinityModes)
+                    {
+                        foreach (var partitioning in testPartitioningModes)
+                        {
+                            foreach (var unroll in testUnrolls)
+                            {
+                                double readSec = MeasureRead(workers, affinity, partitioning, unroll);
+                                double writeSec = MeasureWrite(workers, affinity, partitioning, unroll);
+                                double copySec = MeasureCopy(workers, affinity, partitioning, unroll);
+
+                                double readMBs = (fileSize / (1024.0 * 1024.0)) / readSec;
+                                double writeMBs = (fileSize / (1024.0 * 1024.0)) / writeSec;
+                                double copyMBs = (fileSize / (1024.0 * 1024.0)) / copySec;
+
+                                double readGbps = (readMBs * 8.0) / 1024.0;
+                                double writeGbps = (writeMBs * 8.0) / 1024.0;
+                                double copyGbps = (copyMBs * 8.0) / 1024.0;
+
+                                sweepResults.Add(new
+                                {
+                                    workers,
+                                    affinity,
+                                    partitioning,
+                                    unroll,
+                                    read_sec = readSec,
+                                    read_gbps = readGbps,
+                                    write_sec = writeSec,
+                                    write_gbps = writeGbps,
+                                    copy_sec = copySec,
+                                    copy_gbps = copyGbps
+                                });
+
+                                if (readGbps > bestReadSpeed)
+                                {
+                                    bestReadSpeed = readGbps;
+                                    bestReadWorkers = workers;
+                                    bestReadAff = affinity;
+                                    bestReadPart = partitioning;
+                                    bestReadUnroll = unroll;
+                                }
+                                if (writeGbps > bestWriteSpeed)
+                                {
+                                    bestWriteSpeed = writeGbps;
+                                    bestWriteWorkers = workers;
+                                    bestWriteAff = affinity;
+                                    bestWritePart = partitioning;
+                                    bestWriteUnroll = unroll;
+                                }
+                                if (copyGbps > bestCopySpeed)
+                                {
+                                    bestCopySpeed = copyGbps;
+                                    bestCopyWorkers = workers;
+                                    bestCopyAff = affinity;
+                                    bestCopyPart = partitioning;
+                                    bestCopyUnroll = unroll;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Apply the absolute optimal settings for subsequent production VctpSender copy loop!
+                VctpSender.OptimalWorkerCount = bestCopyWorkers;
+                VctpSender.OptimalAffinityMode = bestCopyAff;
+                VctpSender.OptimalPartitioningMode = bestCopyPart;
+                VctpSender.OptimalUnrollFactor = bestCopyUnroll;
+
+                Console.WriteLine($"[SWEEP] OPTIMAL READ: {bestReadWorkers} workers, {bestReadAff}, {bestReadPart} partitioning, unroll {bestReadUnroll}x => {bestReadSpeed:F2} Gbps");
+                Console.WriteLine($"[SWEEP] OPTIMAL WRITE: {bestWriteWorkers} workers, {bestWriteAff}, {bestWritePart} partitioning, unroll {bestWriteUnroll}x => {bestWriteSpeed:F2} Gbps");
+                Console.WriteLine($"[SWEEP] OPTIMAL COPY: {bestCopyWorkers} workers, {bestCopyAff}, {bestCopyPart} partitioning, unroll {bestCopyUnroll}x => {bestCopySpeed:F2} Gbps");
+            }
+            finally
+            {
+                srcAccessor.SafeMemoryMappedViewHandle.ReleasePointer();
+                destAccessor.SafeMemoryMappedViewHandle.ReleasePointer();
+            }
+        }
+
         // 3. Setup encryption keys
         byte[] key = new byte[32];
         byte[] nonce = new byte[12];
@@ -653,11 +1429,8 @@ app.MapGet("/api/share/test/vctp/benchmark", async () =>
         var logs = new List<string>();
 
         // 4. Start VctpReceiver
-        using var receiver = new VctpReceiver(destMmf, fileSize, "", key, nonce, port: 0);
+        using var receiver = new VctpReceiver(destAccessor, fileSize, "", key, nonce, port: 0, bypassCrypto: true);
         receiver.OnLog += (log) => { logs.Add($"[Receiver] {log}"); Console.WriteLine($"[Receiver] {log}"); };
-        receiver.Start();
-
-        var remoteEP = new IPEndPoint(IPAddress.Loopback, receiver.Port);
 
         var tcs = new TaskCompletionSource<bool>();
         string finalHash = "";
@@ -669,8 +1442,11 @@ app.MapGet("/api/share/test/vctp/benchmark", async () =>
 
         // 5. Run VctpSender
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        using (var sender = new VctpSender(srcMmf, fileSize, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 100000.0))
+        using (var sender = new VctpSender(srcAccessor, fileSize, fileId, srcHashHex, receiver, key, nonce, targetRateMbps: 100000.0, bypassCrypto: true))
         {
+            receiver.LinkSender(sender);
+            receiver.Start();
+
             sender.OnLog += (log) => { logs.Add($"[Sender] {log}"); Console.WriteLine($"[Sender] {log}"); };
             await sender.StartAsync();
             
@@ -683,32 +1459,28 @@ app.MapGet("/api/share/test/vctp/benchmark", async () =>
         bool memCheckPassed = true;
         unsafe
         {
-            using (var srcAccess = srcMmf.CreateViewAccessor(0, fileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read))
-            using (var destAccess = destMmf.CreateViewAccessor(0, fileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read))
+            byte* pSrc = null;
+            byte* pDest = null;
+            srcAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pSrc);
+            destAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pDest);
+            try
             {
-                byte* pSrc = null;
-                byte* pDest = null;
-                srcAccess.SafeMemoryMappedViewHandle.AcquirePointer(ref pSrc);
-                destAccess.SafeMemoryMappedViewHandle.AcquirePointer(ref pDest);
-                try
+                long* pSrcLong = (long*)pSrc;
+                long* pDestLong = (long*)pDest;
+                long longCount = fileSize / 8;
+                for (long i = 0; i < longCount; i++)
                 {
-                    long* pSrcLong = (long*)pSrc;
-                    long* pDestLong = (long*)pDest;
-                    long longCount = fileSize / 8;
-                    for (long i = 0; i < longCount; i++)
+                    if (pSrcLong[i] != pDestLong[i])
                     {
-                        if (pSrcLong[i] != pDestLong[i])
-                        {
-                            memCheckPassed = false;
-                            break;
-                        }
+                        memCheckPassed = false;
+                        break;
                     }
                 }
-                finally
-                {
-                    srcAccess.SafeMemoryMappedViewHandle.ReleasePointer();
-                    destAccess.SafeMemoryMappedViewHandle.ReleasePointer();
-                }
+            }
+            finally
+            {
+                srcAccessor.SafeMemoryMappedViewHandle.ReleasePointer();
+                destAccessor.SafeMemoryMappedViewHandle.ReleasePointer();
             }
         }
 
@@ -736,6 +1508,28 @@ app.MapGet("/api/share/test/vctp/benchmark", async () =>
             duration_sec = durationSec,
             throughput_mbs = throughputMB,
             throughput_gbps = throughputGbps,
+            optimal_copy = new
+            {
+                workers = bestCopyWorkers,
+                affinity = bestCopyAff,
+                partitioning = bestCopyPart,
+                throughput_gbps = bestCopySpeed
+            },
+            optimal_read = new
+            {
+                workers = bestReadWorkers,
+                affinity = bestReadAff,
+                partitioning = bestReadPart,
+                throughput_gbps = bestReadSpeed
+            },
+            optimal_write = new
+            {
+                workers = bestWriteWorkers,
+                affinity = bestWriteAff,
+                partitioning = bestWritePart,
+                throughput_gbps = bestWriteSpeed
+            },
+            sweep_results = sweepResults,
             comparisons = new
             {
                 standard_sftp_https = new { typical_max_speed_mbs = 250.0, speedup_x = throughputMB / 250.0 },

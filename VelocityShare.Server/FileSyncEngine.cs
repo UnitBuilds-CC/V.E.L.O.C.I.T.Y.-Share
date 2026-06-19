@@ -19,6 +19,9 @@ namespace VelocityShare.Server
         private readonly ConcurrentQueue<string> _pendingChanges = new();
         private bool _isApplyingRemoteChange = false;
 
+        public string SyncFolderPath => _syncFolderPath;
+        public ConcurrentDictionary<Guid, (byte[] Key, byte[] Nonce, string FullPath, string FileHash)> ActiveSyncTransfers { get; } = new();
+
         public FileSyncEngine(string syncFolderPath, Func<string, Task> onFileChangedCallback)
         {
             _syncFolderPath = syncFolderPath;
@@ -112,20 +115,50 @@ namespace VelocityShare.Server
                     _fileCatalog[relativePath] = hashHex;
                     SaveCatalog();
 
-                    await _onFileChangedCallback(JsonSerializer.Serialize(new
+                    if (fileBytes.Length >= 65536)
                     {
-                        type = "sync_update",
-                        file = relativePath,
-                        hash = hashHex,
-                        size = fileBytes.Length,
-                        content = Convert.ToBase64String(fileBytes)
-                    }));
+                        var fileId = Guid.NewGuid();
+                        byte[] key = new byte[32];
+                        byte[] nonce = new byte[12];
+                        Random.Shared.NextBytes(key);
+                        Random.Shared.NextBytes(nonce);
+
+                        ActiveSyncTransfers[fileId] = (key, nonce, fullPath, hashHex);
+
+                        await _onFileChangedCallback(JsonSerializer.Serialize(new
+                        {
+                            type = "sync_vctp_offer",
+                            file = relativePath,
+                            hash = hashHex,
+                            size = fileBytes.Length,
+                            fileId = fileId,
+                            key = Convert.ToBase64String(key),
+                            nonce = Convert.ToBase64String(nonce)
+                        }));
+                    }
+                    else
+                    {
+                        await _onFileChangedCallback(JsonSerializer.Serialize(new
+                        {
+                            type = "sync_update",
+                            file = relativePath,
+                            hash = hashHex,
+                            size = fileBytes.Length,
+                            content = Convert.ToBase64String(fileBytes)
+                        }));
+                    }
                 }
             }
             catch (IOException)
             {
                 // File lock retry
             }
+        }
+
+        public void ConfirmRemoteSyncCompleted(string relativePath, string hash)
+        {
+            _fileCatalog[relativePath] = hash;
+            SaveCatalog();
         }
 
         public async Task ApplyRemoteSyncAsync(string type, string relativePath, string hash, byte[]? content)
