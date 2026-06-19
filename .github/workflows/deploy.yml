@@ -20,7 +20,7 @@ jobs:
       - name: Copy Tarball to Azure VM
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: share.unitbuilds.com
+          host: 52.188.14.216
           username: azureuser
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "share.tar.gz"
@@ -29,7 +29,7 @@ jobs:
       - name: Extract and Build Container on VM
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: share.unitbuilds.com
+          host: 52.188.14.216
           username: azureuser
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
