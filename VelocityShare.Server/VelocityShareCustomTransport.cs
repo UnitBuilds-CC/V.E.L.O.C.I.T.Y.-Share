@@ -512,7 +512,7 @@ namespace VelocityShare.Server
         private bool _isFinished = false;
         private bool _receiverConfirmedComplete = false;
         private CancellationTokenSource _cts = new CancellationTokenSource();
-        private readonly ZeroAllocPacketQueue _packetQueue = new ZeroAllocPacketQueue(128);
+        private readonly ZeroAllocPacketQueue _packetQueue = new ZeroAllocPacketQueue(2048);
         private readonly ZeroAllocBufferPool _bufferPool;
         private Thread? _ioThread;
 
@@ -545,7 +545,7 @@ namespace VelocityShare.Server
             _socket.Connect(_remoteEndPoint);
 
             _nackQueue = new ZeroAllocIntQueue(_totalBlocks + 1024);
-            _bufferPool = new ZeroAllocBufferPool(256, 32808);
+            _bufferPool = new ZeroAllocBufferPool(2048, 32808);
         }
 
         public VctpSender(MemoryMappedFile mmf, long fileSize, Guid fileId, string expectedHash, IPEndPoint remoteEndPoint, byte[] cryptoKey, byte[] cryptoNonce, double targetRateMbps = 500.0, bool bypassCrypto = false)
@@ -571,7 +571,7 @@ namespace VelocityShare.Server
             _socket.Connect(_remoteEndPoint);
 
             _nackQueue = new ZeroAllocIntQueue(_totalBlocks + 1024);
-            _bufferPool = new ZeroAllocBufferPool(256, 32808);
+            _bufferPool = new ZeroAllocBufferPool(2048, 32808);
         }
 
         public VctpSender(MemoryMappedFile mmf, long fileSize, Guid fileId, string expectedHash, VctpReceiver directReceiver, byte[] cryptoKey, byte[] cryptoNonce, double targetRateMbps = 500.0, bool bypassCrypto = false)
@@ -596,7 +596,7 @@ namespace VelocityShare.Server
             _socket.ReceiveBufferSize = 16 * 1024 * 1024;
 
             _nackQueue = new ZeroAllocIntQueue(_totalBlocks + 1024);
-            _bufferPool = new ZeroAllocBufferPool(256, 32808);
+            _bufferPool = new ZeroAllocBufferPool(2048, 32808);
         }
 
         public VctpSender(MemoryMappedViewAccessor accessor, long fileSize, Guid fileId, string expectedHash, VctpReceiver directReceiver, byte[] cryptoKey, byte[] cryptoNonce, double targetRateMbps = 500.0, bool bypassCrypto = false)
@@ -619,7 +619,7 @@ namespace VelocityShare.Server
             _socket = null!;
 
             _nackQueue = new ZeroAllocIntQueue(_totalBlocks + 1024);
-            _bufferPool = new ZeroAllocBufferPool(256, 32808);
+            _bufferPool = new ZeroAllocBufferPool(2048, 32808);
         }
 
         private unsafe void InitSenderMmf()
@@ -1485,8 +1485,8 @@ namespace VelocityShare.Server
         private CancellationTokenSource _cts = new CancellationTokenSource();
         private System.Threading.Timer? _nackTimer;
         private System.Threading.Timer? _flushTimer;
-        private readonly ZeroAllocDecryptQueue _decryptQueue = new ZeroAllocDecryptQueue(256);
-        private readonly ZeroAllocBufferPool _bufferPool = new ZeroAllocBufferPool(512, 32808);
+        private readonly ZeroAllocDecryptQueue _decryptQueue = new ZeroAllocDecryptQueue(4096);
+        private readonly ZeroAllocBufferPool _bufferPool = new ZeroAllocBufferPool(4096, 32808);
         private readonly object _stateLock = new object();
 
         private VctpSender? _directSender;
@@ -1644,7 +1644,7 @@ namespace VelocityShare.Server
 
                 StartDecryptionWorkers();
 
-                _nackTimer = new System.Threading.Timer(ProcessNacks, null, 50, 50);
+                _nackTimer = new System.Threading.Timer(ProcessNacks, null, 10, 10);
                 _flushTimer = new System.Threading.Timer(FlushMetadata, null, 500, 500);
             }
         }
@@ -2010,10 +2010,15 @@ namespace VelocityShare.Server
 
         private unsafe void ProcessNacks(object? state)
         {
+            ProcessNacksInternal(false);
+        }
+
+        private unsafe void ProcessNacksInternal(bool force)
+        {
             if ((_senderEndPoint == null && _directSender == null) || _pendingNacks.IsEmpty || _isFinished) return;
 
             long currentTimestamp = Stopwatch.GetTimestamp();
-            long minIntervalTicks = (long)(0.1 * Stopwatch.Frequency); // 100ms minimum backoff window
+            long minIntervalTicks = force ? 0 : (long)(0.02 * Stopwatch.Frequency); // 20ms minimum backoff window
 
             int* uniqueIndices = stackalloc int[300];
             int count = 0;
@@ -2181,7 +2186,7 @@ namespace VelocityShare.Server
                     }
 
                     SendHandshakeReply();
-                    ProcessNacks(null);
+                    ProcessNacksInternal(true);
                     return;
                 }
 
