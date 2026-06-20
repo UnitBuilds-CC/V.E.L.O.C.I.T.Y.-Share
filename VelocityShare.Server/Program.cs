@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using VelocityShare.Server;
+using Protocol = VelocityShare.Protocol;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -48,6 +49,78 @@ dropsiteConfig["path"] = defaultUploadsDir;
 FileSyncEngine? activeSyncEngine = null;
 var activeReceivers = new ConcurrentDictionary<Guid, VctpReceiver>();
 
+string sandboxRoot = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "wwwroot"));
+
+bool IsPathInsideSandbox(string path, string sandbox)
+{
+    if (string.IsNullOrEmpty(path) || path.Contains("..")) return false;
+    try
+    {
+        string fullPath = Path.GetFullPath(path);
+        string fullSandbox = Path.GetFullPath(sandbox);
+        string separator = Path.DirectorySeparatorChar.ToString();
+        if (!fullSandbox.EndsWith(separator))
+        {
+            fullSandbox += separator;
+        }
+        return fullPath.Equals(Path.GetFullPath(sandbox), StringComparison.OrdinalIgnoreCase) ||
+               fullPath.StartsWith(fullSandbox, StringComparison.OrdinalIgnoreCase);
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+bool IsFileInsideSyncFolder(string file, string syncFolder)
+{
+    if (string.IsNullOrEmpty(file) || file.Contains("..")) return false;
+    try
+    {
+        string combinedPath = Path.Combine(syncFolder, file);
+        string fullPath = Path.GetFullPath(combinedPath);
+        string canonicalSyncFolder = Path.GetFullPath(syncFolder);
+        string separator = Path.DirectorySeparatorChar.ToString();
+        if (!canonicalSyncFolder.EndsWith(separator))
+        {
+            canonicalSyncFolder += separator;
+        }
+        return fullPath.StartsWith(canonicalSyncFolder, StringComparison.OrdinalIgnoreCase);
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+// Start background loop to clean up zombied VctpReceiver instances (inactivity > 60 seconds)
+_ = Task.Run(async () =>
+{
+    while (true)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10));
+            var cutoff = DateTime.UtcNow.AddSeconds(-60);
+            foreach (var kvp in activeReceivers)
+            {
+                if (kvp.Value.LastActiveTime < cutoff)
+                {
+                    if (activeReceivers.TryRemove(kvp.Key, out var receiver))
+                    {
+                        Console.WriteLine($"[Sync Engine] Cleaning up zombied VctpReceiver {kvp.Key} due to 60s inactivity.");
+                        receiver.Dispose();
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Sync Engine Error] Error in activeReceivers cleanup task: {ex.Message}");
+        }
+    }
+});
+
 // POST /api/share/sync/start: Starts the directory sync engine watching a local folder path
 app.MapPost("/api/share/sync/start", async (HttpContext context) =>
 {
@@ -59,9 +132,17 @@ app.MapPost("/api/share/sync/start", async (HttpContext context) =>
         return Results.BadRequest("Missing path or targetPeerId parameters.");
     }
 
-    if (!Directory.Exists(path))
+    // Path traversal / sandboxing verification
+    if (!IsPathInsideSandbox(path, sandboxRoot))
     {
-        Directory.CreateDirectory(path);
+        return Results.BadRequest("Path must be located inside the sandboxed wwwroot folder and cannot contain directory traversal.");
+    }
+    
+    string fullPath = Path.GetFullPath(path);
+
+    if (!Directory.Exists(fullPath))
+    {
+        Directory.CreateDirectory(fullPath);
     }
 
     if (activeSyncEngine != null)
@@ -71,22 +152,13 @@ app.MapPost("/api/share/sync/start", async (HttpContext context) =>
         activeSyncEngine = null;
     }
 
-    activeSyncEngine = new FileSyncEngine(path, async (syncEventJson) =>
+    activeSyncEngine = new FileSyncEngine(path, targetPeerId, async (binaryPacket) =>
     {
-        var envelope = JsonSerializer.Serialize(new
-        {
-            type = "folder_sync_payload",
-            sender = "local_sync_engine",
-            target = targetPeerId,
-            data = syncEventJson
-        });
-        byte[] payload = Encoding.UTF8.GetBytes(envelope);
-
         // 1. Dispatch directly to target socket if it exists on this server instance (same-server peer connection)
         if (activePeers.TryGetValue(targetPeerId, out var targetSocket) && targetSocket.State == WebSocketState.Open)
         {
-            await targetSocket.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, CancellationToken.None);
-            Console.WriteLine($"[Sync Engine] Dispatched sync payload directly to peer {targetPeerId}");
+            await targetSocket.SendAsync(new ArraySegment<byte>(binaryPacket), WebSocketMessageType.Binary, true, CancellationToken.None);
+            Console.WriteLine($"[Sync Engine] Dispatched binary sync payload directly to peer {targetPeerId}");
         }
 
         // 2. Dispatch to all other active sockets connected to this server instance (local browser tab(s))
@@ -94,8 +166,8 @@ app.MapPost("/api/share/sync/start", async (HttpContext context) =>
         {
             if (peer.Key != targetPeerId && peer.Value.State == WebSocketState.Open)
             {
-                await peer.Value.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, CancellationToken.None);
-                Console.WriteLine($"[Sync Engine] Dispatched sync payload to local peer {peer.Key} for forwarding");
+                await peer.Value.SendAsync(new ArraySegment<byte>(binaryPacket), WebSocketMessageType.Binary, true, CancellationToken.None);
+                Console.WriteLine($"[Sync Engine] Dispatched binary sync payload to local peer {peer.Key} for forwarding");
             }
         }
     });
@@ -206,10 +278,16 @@ app.Map("/ws/share", async (HttpContext context) =>
                                     byte[] key = Convert.FromBase64String(innerDoc.RootElement.GetProperty("key").GetString() ?? "");
                                     byte[] nonce = Convert.FromBase64String(innerDoc.RootElement.GetProperty("nonce").GetString() ?? "");
 
-                                    string syncFolder = activeSyncEngine.SyncFolderPath;
-                                    string targetDir = Path.GetDirectoryName(Path.Combine(syncFolder, file)) ?? syncFolder;
+                                     string syncFolder = activeSyncEngine.SyncFolderPath;
+                                     if (!IsFileInsideSyncFolder(file, syncFolder))
+                                     {
+                                         Console.WriteLine($"[Sync Engine Error] Path traversal blocked: {file}");
+                                         continue;
+                                     }
+                                     string combinedPath = Path.Combine(syncFolder, file);
+                                     string targetDir = Path.GetDirectoryName(Path.GetFullPath(combinedPath)) ?? syncFolder;
 
-                                    var receiver = new VctpReceiver(targetDir, key, nonce, port: 0);
+                                     var receiver = new VctpReceiver(targetDir, key, nonce, port: 0);
                                     activeReceivers[fileId] = receiver;
 
                                     receiver.OnTransferComplete += (filePath, fileHash) =>
@@ -320,6 +398,115 @@ app.Map("/ws/share", async (HttpContext context) =>
                         }
                     }
                 }
+                else if (result.MessageType == WebSocketMessageType.Binary)
+                {
+                    byte[] rawBytes = ms.ToArray();
+                    try
+                    {
+                        var message = new Protocol.NdaSignaling.ParsedMessage(rawBytes);
+                        string target = message.TargetPeerId;
+
+                        if (target == "local_sync_engine" && activeSyncEngine != null)
+                        {
+                            // Process locally in the sync engine
+                            if (message.Action == "delete") // Delete
+                            {
+                                string file = message.FilePath;
+                                await activeSyncEngine.ApplyRemoteSyncAsync("sync_delete", file, "", null);
+                                Console.WriteLine($"[Server Local Sync] Applied NDA delete for {file}");
+                            }
+                            else if (message.Action == "update") // Update
+                            {
+                                string file = message.FilePath;
+                                string hash = message.HashHex;
+                                byte[] content = message.Content;
+
+                                await activeSyncEngine.ApplyRemoteSyncAsync("sync_update", file, hash, content);
+                                Console.WriteLine($"[Server Local Sync] Applied NDA update for {file}");
+                            }
+                            else if (message.Action == "offer") // VCTP Offer
+                            {
+                                string file = message.FilePath;
+                                string hash = message.HashHex;
+                                Guid fid = message.FileId;
+                                byte[] key = message.Key;
+                                byte[] nonce = message.Nonce;
+
+                                string syncFolder = activeSyncEngine.SyncFolderPath;
+                                if (!IsFileInsideSyncFolder(file, syncFolder))
+                                {
+                                    Console.WriteLine($"[Sync Engine Error] Path traversal blocked in NDA offer: {file}");
+                                    continue;
+                                }
+                                string combinedPath = Path.Combine(syncFolder, file);
+                                string targetDir = Path.GetDirectoryName(Path.GetFullPath(combinedPath)) ?? syncFolder;
+
+                                var receiver = new VctpReceiver(targetDir, key, nonce, port: 0);
+                                activeReceivers[fid] = receiver;
+
+                                receiver.OnTransferComplete += (filePath, fileHash) =>
+                                {
+                                    activeSyncEngine.ConfirmRemoteSyncCompleted(file, fileHash);
+                                    receiver.Dispose();
+                                    activeReceivers.TryRemove(fid, out _);
+                                    Console.WriteLine($"[Sync Engine] VCTP sync receiver complete for {file}");
+                                };
+                                receiver.Start();
+
+                                // Send accept NDA packet back to peer
+                                byte[] acceptPacket = Protocol.NdaSignaling.CreateAccept(peerId, fid, receiver.Port);
+
+                                await webSocket.SendAsync(new ArraySegment<byte>(acceptPacket), WebSocketMessageType.Binary, true, CancellationToken.None);
+                            }
+                            else if (message.Action == "accept") // VCTP Accept
+                            {
+                                Guid fid = message.FileId;
+                                int port = message.Port;
+
+                                if (activeSyncEngine.ActiveSyncTransfers.TryRemove(fid, out var senderInfo))
+                                {
+                                    var (key, nonce, fullPath, fileHash) = senderInfo;
+                                    var remoteEP = new IPEndPoint(IPAddress.Loopback, port);
+                                    _ = Task.Run(async () =>
+                                    {
+                                        try
+                                        {
+                                            using var vctpSender = new VctpSender(fullPath, fid, fileHash, remoteEP, key, nonce, targetRateMbps: 1000.0);
+                                            await vctpSender.StartAsync();
+                                            Console.WriteLine($"[Sync Engine] VCTP sync sender complete for {fullPath}");
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"[Sync Engine] VCTP sync sender failed: {ex.Message}");
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        else if (activePeers.TryGetValue(target, out var targetSocket) && targetSocket.State == WebSocketState.Open)
+                        {
+                            // Route/forward to other peer
+                            if (message.Action == "accept")
+                            {
+                                string senderIp = context.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1";
+                                if (senderIp == "::1" || senderIp == "127.0.0.1")
+                                {
+                                    senderIp = "127.0.0.1";
+                                }
+                                byte[] forwardPacket = Protocol.NdaSignaling.CreateAccept(target, message.FileId, message.Port, senderIp);
+                                await targetSocket.SendAsync(new ArraySegment<byte>(forwardPacket), WebSocketMessageType.Binary, true, CancellationToken.None);
+                            }
+                            else
+                            {
+                                await targetSocket.SendAsync(new ArraySegment<byte>(rawBytes), WebSocketMessageType.Binary, true, CancellationToken.None);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Server NDA Signaling Error] {ex.Message}");
+                    }
+                }
             }
         }
     }
@@ -357,13 +544,21 @@ app.MapPost("/api/share/dumpsite", async (HttpContext context) =>
             return Results.BadRequest("Path cannot be empty.");
         }
 
-        if (type == "local_nas" && !Directory.Exists(path))
+        // Path traversal / sandboxing verification
+        if (!IsPathInsideSandbox(path, sandboxRoot))
         {
-            Directory.CreateDirectory(path);
+            return Results.BadRequest("Path must be located inside the sandboxed wwwroot folder and cannot contain directory traversal.");
+        }
+        
+        string fullPath = Path.GetFullPath(path);
+
+        if (type == "local_nas" && !Directory.Exists(fullPath))
+        {
+            Directory.CreateDirectory(fullPath);
         }
 
         dropsiteConfig["type"] = type;
-        dropsiteConfig["path"] = path;
+        dropsiteConfig["path"] = fullPath;
         Console.WriteLine($"[Dropsite Config] Updated to type: {type}, path: {path}");
         return Results.Ok(dropsiteConfig);
     }
@@ -1606,15 +1801,10 @@ app.MapGet("/", async (HttpContext context) =>
 
 app.Run();
 
-// Helper method to broadcast currently connected peer lists to all active sockets
+// Helper method to broadcast currently connected peer lists to all active sockets using NDA binary
 static async Task BroadcastPeerListAsync(ConcurrentDictionary<string, WebSocket> activePeers)
 {
-    var listMsg = JsonSerializer.Serialize(new
-    {
-        type = "peer_list",
-        peers = activePeers.Keys
-    });
-    byte[] payload = Encoding.UTF8.GetBytes(listMsg);
+    byte[] payload = Protocol.NdaSignaling.CreatePeerList(activePeers.Keys);
 
     foreach (var peer in activePeers)
     {
@@ -1622,7 +1812,7 @@ static async Task BroadcastPeerListAsync(ConcurrentDictionary<string, WebSocket>
         {
             try
             {
-                await peer.Value.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, CancellationToken.None);
+                await peer.Value.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Binary, true, CancellationToken.None);
             }
             catch
             {

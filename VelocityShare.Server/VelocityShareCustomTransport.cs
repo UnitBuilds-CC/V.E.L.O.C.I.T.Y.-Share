@@ -1612,6 +1612,7 @@ namespace VelocityShare.Server
         public event Action<string, string>? OnTransferComplete; // filePath, fileHash
 
         public int Port { get; private set; }
+        public DateTime LastActiveTime { get; set; } = DateTime.UtcNow;
 
         public void LinkSender(VctpSender sender)
         {
@@ -1815,6 +1816,7 @@ namespace VelocityShare.Server
 
         private unsafe void ProcessIncomingPacket(byte[] buffer, int bytesReceived, EndPoint remoteEP, int poolIndex = -1)
         {
+            LastActiveTime = DateTime.UtcNow;
             if (!_connected && _socket != null)
             {
                 lock (_stateLock)

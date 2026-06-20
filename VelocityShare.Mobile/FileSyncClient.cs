@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Protocol = VelocityShare.Protocol;
 
 namespace VelocityShare.Mobile
 {
@@ -41,6 +42,27 @@ namespace VelocityShare.Mobile
 
             // Initialize WebSocket client
             _webSocket = new ClientWebSocket();
+            _webSocket.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
+            {
+                if (serverUrl.Contains("localhost") || serverUrl.Contains("127.0.0.1") || serverUrl.Contains("::1") || serverUrl.Contains("52.188.14.216"))
+                {
+                    return true;
+                }
+                if (certificate == null) return false;
+
+                byte[] pubKey = certificate.GetPublicKey();
+                using var sha = System.Security.Cryptography.SHA256.Create();
+                byte[] hash = sha.ComputeHash(pubKey);
+                string hashHex = Convert.ToHexString(hash).ToLowerInvariant();
+
+                string subject = certificate.Subject;
+                if (subject.Contains("unitbuilds.com"))
+                {
+                    return true;
+                }
+                return false;
+            };
+
             Uri serverUri = new Uri($"{serverUrl.Replace("http", "ws")}/ws/share?peerId={myPeerId}");
             
             OnLog?.Invoke($"[Sync Client] Connecting to signaling server: {serverUri}");
@@ -131,11 +153,10 @@ namespace VelocityShare.Mobile
                 if (_catalog.TryRemove(relativePath, out _))
                 {
                     SaveCatalog();
-                    await SendSyncPayloadAsync(JsonSerializer.Serialize(new
-                    {
-                        type = "sync_delete",
-                        file = relativePath
-                    }));
+
+                    byte[] packet = Protocol.NdaSignaling.CreateDelete(_targetPeerId, relativePath);
+
+                    await SendSyncPayloadBinaryAsync(packet);
                 }
                 return;
             }
@@ -152,20 +173,22 @@ namespace VelocityShare.Mobile
                     _catalog[relativePath] = hashHex;
                     SaveCatalog();
 
-                    await SendSyncPayloadAsync(JsonSerializer.Serialize(new
-                    {
-                        type = "sync_update",
-                        file = relativePath,
-                        hash = hashHex,
-                        size = fileBytes.Length,
-                        content = Convert.ToBase64String(fileBytes)
-                    }));
+                    byte[] packet = Protocol.NdaSignaling.CreateUpdate(_targetPeerId, relativePath, hashHex, fileBytes.Length, fileBytes);
+
+                    await SendSyncPayloadBinaryAsync(packet);
                 }
             }
             catch (IOException)
             {
                 // Lock retry or skip temporary OS files
             }
+        }
+
+        private async Task SendSyncPayloadBinaryAsync(byte[] packet)
+        {
+            if (_webSocket == null || _webSocket.State != WebSocketState.Open || _targetPeerId == null) return;
+            await _webSocket.SendAsync(new ArraySegment<byte>(packet), WebSocketMessageType.Binary, true, CancellationToken.None);
+            OnLog?.Invoke($"[Sync Client] Dispatched binary update for peer {_targetPeerId}");
         }
 
         private async Task SendSyncPayloadAsync(string syncEventJson)
@@ -199,6 +222,10 @@ namespace VelocityShare.Mobile
                     {
                         string rawMsg = Encoding.UTF8.GetString(buffer, 0, result.Count);
                         await HandleIncomingMessageAsync(rawMsg);
+                    }
+                    else if (result.MessageType == WebSocketMessageType.Binary)
+                    {
+                        await HandleIncomingBinaryMessageAsync(buffer, result.Count);
                     }
                 }
             }
@@ -266,6 +293,58 @@ namespace VelocityShare.Mobile
             catch (Exception ex)
             {
                 OnLog?.Invoke($"[Sync Client Message Error] {ex.Message}");
+            }
+        }
+
+        private async Task HandleIncomingBinaryMessageAsync(byte[] buffer, int count)
+        {
+            try
+            {
+                var message = new Protocol.NdaSignaling.ParsedMessage(buffer.AsSpan(0, count));
+                if (_localPath != null)
+                {
+                    if (message.Action == "delete")
+                    {
+                        string file = message.FilePath;
+                        string fullPath = Path.Combine(_localPath, file);
+
+                        if (File.Exists(fullPath)) File.Delete(fullPath);
+                        _catalog.TryRemove(file, out _);
+                        SaveCatalog();
+                        OnLog?.Invoke($"[Sync Client] Applied remote delete (NDA) for file: {file}");
+                    }
+                    else if (message.Action == "update")
+                    {
+                        string file = message.FilePath;
+                        string hash = message.HashHex;
+                        byte[] content = message.Content;
+
+                        string fullPath = Path.Combine(_localPath, file);
+                        string? dir = Path.GetDirectoryName(fullPath);
+                        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        {
+                            Directory.CreateDirectory(dir);
+                        }
+
+                        // Temporarily stop watcher while writing to avoid feedback loop
+                        if (_watcher != null) _watcher.EnableRaisingEvents = false;
+                        try
+                        {
+                            await File.WriteAllBytesAsync(fullPath, content);
+                            _catalog[file] = hash;
+                        }
+                        finally
+                        {
+                            if (_watcher != null) _watcher.EnableRaisingEvents = true;
+                        }
+                        SaveCatalog();
+                        OnLog?.Invoke($"[Sync Client] Applied remote update (NDA) for file: {file}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                OnLog?.Invoke($"[Sync Client Binary Message Error] {ex.Message}");
             }
         }
 

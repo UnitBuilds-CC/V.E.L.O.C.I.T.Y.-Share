@@ -5,6 +5,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Protocol = VelocityShare.Protocol;
 
 namespace VelocityShare.Server
 {
@@ -14,7 +15,8 @@ namespace VelocityShare.Server
         private readonly FileSystemWatcher _watcher;
         private readonly string _metadataPath;
         private readonly ConcurrentDictionary<string, string> _fileCatalog = new();
-        private readonly Func<string, Task> _onFileChangedCallback;
+        private readonly string _targetPeerId;
+        private readonly Func<byte[], Task> _onFileChangedCallback;
         private readonly System.Threading.Timer _debounceTimer;
         private readonly ConcurrentQueue<string> _pendingChanges = new();
         private bool _isApplyingRemoteChange = false;
@@ -22,9 +24,10 @@ namespace VelocityShare.Server
         public string SyncFolderPath => _syncFolderPath;
         public ConcurrentDictionary<Guid, (byte[] Key, byte[] Nonce, string FullPath, string FileHash)> ActiveSyncTransfers { get; } = new();
 
-        public FileSyncEngine(string syncFolderPath, Func<string, Task> onFileChangedCallback)
+        public FileSyncEngine(string syncFolderPath, string targetPeerId, Func<byte[], Task> onFileChangedCallback)
         {
             _syncFolderPath = syncFolderPath;
+            _targetPeerId = targetPeerId;
             _onFileChangedCallback = onFileChangedCallback;
             _metadataPath = Path.Combine(_syncFolderPath, ".velocity_sync_metadata.json");
 
@@ -94,11 +97,10 @@ namespace VelocityShare.Server
                 if (_fileCatalog.TryRemove(relativePath, out _))
                 {
                     SaveCatalog();
-                    await _onFileChangedCallback(JsonSerializer.Serialize(new
-                    {
-                        type = "sync_delete",
-                        file = relativePath
-                    }));
+
+                    byte[] packet = Protocol.NdaSignaling.CreateDelete(_targetPeerId ?? "", relativePath);
+
+                    await _onFileChangedCallback(packet);
                 }
                 return;
             }
@@ -125,27 +127,15 @@ namespace VelocityShare.Server
 
                         ActiveSyncTransfers[fileId] = (key, nonce, fullPath, hashHex);
 
-                        await _onFileChangedCallback(JsonSerializer.Serialize(new
-                        {
-                            type = "sync_vctp_offer",
-                            file = relativePath,
-                            hash = hashHex,
-                            size = fileBytes.Length,
-                            fileId = fileId,
-                            key = Convert.ToBase64String(key),
-                            nonce = Convert.ToBase64String(nonce)
-                        }));
+                        byte[] packet = Protocol.NdaSignaling.CreateOffer(_targetPeerId ?? "", relativePath, hashHex, fileBytes.Length, fileId, key, nonce);
+
+                        await _onFileChangedCallback(packet);
                     }
                     else
                     {
-                        await _onFileChangedCallback(JsonSerializer.Serialize(new
-                        {
-                            type = "sync_update",
-                            file = relativePath,
-                            hash = hashHex,
-                            size = fileBytes.Length,
-                            content = Convert.ToBase64String(fileBytes)
-                        }));
+                        byte[] packet = Protocol.NdaSignaling.CreateUpdate(_targetPeerId ?? "", relativePath, hashHex, fileBytes.Length, fileBytes);
+
+                        await _onFileChangedCallback(packet);
                     }
                 }
             }
@@ -161,12 +151,31 @@ namespace VelocityShare.Server
             SaveCatalog();
         }
 
-        public async Task ApplyRemoteSyncAsync(string type, string relativePath, string hash, byte[]? content)
+        public async Task ApplyRemoteSyncAsync(string type, string relativePath, string hash, ReadOnlyMemory<byte> content)
         {
-            _isApplyingRemoteChange = true;
+            if (string.IsNullOrEmpty(relativePath) || relativePath.Contains(".."))
+            {
+                Console.WriteLine($"[Sync Engine Error] Path traversal blocked in ApplyRemoteSyncAsync: {relativePath}");
+                return;
+            }
+
             try
             {
-                string fullPath = Path.Combine(_syncFolderPath, relativePath);
+                string combinedPath = Path.Combine(_syncFolderPath, relativePath);
+                string fullPath = Path.GetFullPath(combinedPath);
+                string canonicalSyncFolder = Path.GetFullPath(_syncFolderPath);
+                string separator = Path.DirectorySeparatorChar.ToString();
+                if (!canonicalSyncFolder.EndsWith(separator))
+                {
+                    canonicalSyncFolder += separator;
+                }
+                if (!fullPath.StartsWith(canonicalSyncFolder, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"[Sync Engine Error] Path escapes sync folder: {relativePath}");
+                    return;
+                }
+
+                _isApplyingRemoteChange = true;
                 string? dir = Path.GetDirectoryName(fullPath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                 {
@@ -181,7 +190,7 @@ namespace VelocityShare.Server
                     }
                     _fileCatalog.TryRemove(relativePath, out _);
                 }
-                else if (type == "sync_update" && content != null)
+                else if (type == "sync_update" && !content.IsEmpty)
                 {
                     await File.WriteAllBytesAsync(fullPath, content);
                     _fileCatalog[relativePath] = hash;

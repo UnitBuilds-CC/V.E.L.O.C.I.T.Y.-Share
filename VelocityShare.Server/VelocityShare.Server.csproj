@@ -13,6 +13,10 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\V.E.L.O.C.I.T.Y.-NDA\src\Velocity.NDA\Velocity.NDA.csproj" />
+  </ItemGroup>
+
   <Target Name="CopyRustDll" BeforeTargets="Build">
     <Copy SourceFiles="..\velocity_share_ffi\target\release\velocity_share_ffi.dll" DestinationFolder="." SkipUnchangedFiles="true" Condition="Exists('..\velocity_share_ffi\target\release\velocity_share_ffi.dll')" />
   </Target>

@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\VelocityShare.Server\VelocityShare.Server.csproj" />
+    <ProjectReference Include="..\..\V.E.L.O.C.I.T.Y.-NDA\src\Velocity.NDA\Velocity.NDA.csproj" />
   </ItemGroup>
 
   <Target Name="CopyNativeDll" AfterTargets="Build">

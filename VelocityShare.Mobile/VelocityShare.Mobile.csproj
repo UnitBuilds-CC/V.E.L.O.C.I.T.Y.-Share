@@ -71,4 +71,11 @@
 		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
 	</ItemGroup>
 
+	<ItemGroup>
+		<Compile Include="..\VelocityShare.Server\NdaSignaling.cs" Link="NdaSignaling.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\..\V.E.L.O.C.I.T.Y.-NDA\src\Velocity.NDA\Velocity.NDA.csproj" />
+	</ItemGroup>
 </Project>

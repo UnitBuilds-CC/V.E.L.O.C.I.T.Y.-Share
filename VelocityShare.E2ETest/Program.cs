@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using VelocityShare.Server;
+using Protocol = VelocityShare.Protocol;
 
 namespace VelocityShare.E2ETest
 {
@@ -136,49 +137,31 @@ namespace VelocityShare.E2ETest
                     while (wsB.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
                     {
                         var result = await wsB.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
-                        if (result.MessageType == WebSocketMessageType.Text)
+                        if (result.MessageType == WebSocketMessageType.Binary)
                         {
-                            string rawMsg = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                            var doc = JsonDocument.Parse(rawMsg);
-                            string msgType = doc.RootElement.GetProperty("type").GetString() ?? "";
-
-                            if (msgType == "folder_sync_payload")
+                            var message = new Protocol.NdaSignaling.ParsedMessage(buffer.AsSpan(0, result.Count));
+                            if (message.Action == "offer")
                             {
-                                string innerData = doc.RootElement.GetProperty("data").GetString() ?? "";
-                                var innerDoc = JsonDocument.Parse(innerData);
-                                string syncType = innerDoc.RootElement.GetProperty("type").GetString() ?? "";
+                                string file = message.FilePath;
+                                string hash = message.HashHex;
+                                long size = message.FileSize;
+                                Guid fid = message.FileId;
+                                byte[] key = message.Key;
+                                byte[] nonce = message.Nonce;
 
-                                if (syncType == "sync_vctp_offer")
+                                activeReceiver = new VctpReceiver(destMmf, FileSize, "", key, nonce, port: 0, bypassCrypto: bypassCrypto);
+                                activeReceiver.OnLog += (logMsg) => Console.WriteLine($"[Receiver Log] {logMsg}");
+                                activeReceiver.OnTransferComplete += (filePath, fileHash) =>
                                 {
-                                    string file = innerDoc.RootElement.GetProperty("file").GetString() ?? "";
-                                    Guid fid = innerDoc.RootElement.GetProperty("fileId").GetGuid();
-                                    byte[] key = Convert.FromBase64String(innerDoc.RootElement.GetProperty("key").GetString() ?? "");
-                                    byte[] nonce = Convert.FromBase64String(innerDoc.RootElement.GetProperty("nonce").GetString() ?? "");
+                                    finalDestHash = fileHash;
+                                    tcs.TrySetResult(true);
+                                };
+                                activeReceiver.Start();
 
-                                    activeReceiver = new VctpReceiver(destMmf, FileSize, "", key, nonce, port: 0, bypassCrypto: bypassCrypto);
-                                    activeReceiver.OnLog += (logMsg) => Console.WriteLine($"[Receiver Log] {logMsg}");
-                                    activeReceiver.OnTransferComplete += (filePath, fileHash) =>
-                                    {
-                                        finalDestHash = fileHash;
-                                        tcs.TrySetResult(true);
-                                    };
-                                    activeReceiver.Start();
+                                // Send accept NDA packet
+                                byte[] acceptPacket = Protocol.NdaSignaling.CreateAccept(PeerA, fid, activeReceiver.Port);
 
-                                    var acceptEnvelope = JsonSerializer.Serialize(new
-                                    {
-                                        type = "folder_sync_payload",
-                                        sender = PeerB,
-                                        target = PeerA,
-                                        data = JsonSerializer.Serialize(new
-                                        {
-                                            type = "sync_vctp_accept",
-                                            fileId = fid,
-                                            port = activeReceiver.Port
-                                        })
-                                    });
-
-                                    await wsB.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(acceptEnvelope)), WebSocketMessageType.Text, true, cts.Token);
-                                }
+                                await wsB.SendAsync(new ArraySegment<byte>(acceptPacket), WebSocketMessageType.Binary, true, cts.Token);
                             }
                         }
                     }
@@ -198,39 +181,31 @@ namespace VelocityShare.E2ETest
                     while (wsA.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
                     {
                         var result = await wsA.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
-                        if (result.MessageType == WebSocketMessageType.Text)
+                        if (result.MessageType == WebSocketMessageType.Binary)
                         {
-                            string rawMsg = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                            var doc = JsonDocument.Parse(rawMsg);
-                            string msgType = doc.RootElement.GetProperty("type").GetString() ?? "";
-
-                            if (msgType == "folder_sync_payload")
+                            var message = new Protocol.NdaSignaling.ParsedMessage(buffer.AsSpan(0, result.Count));
+                            if (message.Action == "accept")
                             {
-                                string innerData = doc.RootElement.GetProperty("data").GetString() ?? "";
-                                var innerDoc = JsonDocument.Parse(innerData);
-                                string syncType = innerDoc.RootElement.GetProperty("type").GetString() ?? "";
-                                if (syncType == "sync_vctp_accept")
-                                {
-                                    Guid fid = innerDoc.RootElement.GetProperty("fileId").GetGuid();
-                                    int port = innerDoc.RootElement.GetProperty("port").GetInt32();
-                                    string senderIp = doc.RootElement.TryGetProperty("senderIp", out var ipProp) ? ipProp.GetString() ?? "127.0.0.1" : "127.0.0.1";
-                                    var remoteEP = new IPEndPoint(IPAddress.Parse(senderIp), port);
-                                    stopwatch.Start();
+                                Guid fid = message.FileId;
+                                int port = message.Port;
+                                string senderIp = message.SenderIp;
 
-                                    _ = Task.Run(async () =>
+                                var remoteEP = new IPEndPoint(IPAddress.Parse(senderIp), port);
+                                stopwatch.Start();
+
+                                _ = Task.Run(async () =>
+                                {
+                                    try
                                     {
-                                        try
-                                        {
-                                            activeSender = new VctpSender(srcMmf, FileSize, fid, expectedHashHex, remoteEP, vctpKey, vctpNonce, targetRateMbps: 100000.0, bypassCrypto: bypassCrypto);
-                                            activeSender.OnLog += (logMsg) => Console.WriteLine($"[Sender Log] {logMsg}");
-                                            await activeSender.StartAsync();
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            Console.WriteLine($"[Peer A Sender Error] {ex.Message}");
-                                        }
-                                    });
-                                }
+                                        activeSender = new VctpSender(srcMmf, FileSize, fid, expectedHashHex, remoteEP, vctpKey, vctpNonce, targetRateMbps: 100000.0, bypassCrypto: bypassCrypto);
+                                        activeSender.OnLog += (logMsg) => Console.WriteLine($"[Sender Log] {logMsg}");
+                                        await activeSender.StartAsync();
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"[Peer A Sender Error] {ex.Message}");
+                                    }
+                                });
                             }
                         }
                     }
@@ -242,24 +217,11 @@ namespace VelocityShare.E2ETest
                 }
             });
 
-            var offerEnvelope = JsonSerializer.Serialize(new
-            {
-                type = "folder_sync_payload",
-                sender = PeerA,
-                target = PeerB,
-                data = JsonSerializer.Serialize(new
-                {
-                    type = "sync_vctp_offer",
-                    file = TestFileName,
-                    hash = expectedHashHex,
-                    size = FileSize,
-                    fileId = fileId,
-                    key = Convert.ToBase64String(vctpKey),
-                    nonce = Convert.ToBase64String(vctpNonce)
-                })
-            });
+            byte[] hashBytes = Convert.FromHexString(expectedHashHex);
 
-            await wsA.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(offerEnvelope)), WebSocketMessageType.Text, true, cts.Token);
+            byte[] offerPacket = Protocol.NdaSignaling.CreateOffer(PeerB, TestFileName, expectedHashHex, FileSize, fileId, vctpKey, vctpNonce);
+
+            await wsA.SendAsync(new ArraySegment<byte>(offerPacket), WebSocketMessageType.Binary, true, cts.Token);
 
             // Wait for receiver to signal completion (max 60 seconds)
             await Task.WhenAny(tcs.Task, Task.Delay(60000));

@@ -4,6 +4,75 @@
 const myPeerId = "peer_" + Math.random().toString(36).substring(2, 8);
 document.getElementById('my-peer-id').textContent = myPeerId;
 
+function parseNda(arrayBuffer) {
+    const view = new DataView(arrayBuffer);
+    const magic = view.getUint32(0, true);
+    if (magic !== 0x3141444E) {
+        throw new Error("Invalid magic bytes in NDA document");
+    }
+
+    const tripleCount = view.getUint32(40, true);
+    const commandCount = view.getUint32(44, true);
+    const stringPoolOffset = view.getUint32(48, true);
+
+    const stringPoolBytes = new Uint8Array(arrayBuffer, stringPoolOffset);
+
+    function getString(offset) {
+        if (offset === 0) return "";
+        const len = new DataView(stringPoolBytes.buffer, stringPoolBytes.byteOffset + offset, 2).getUint16(0, true);
+        const decoder = new TextDecoder("utf-8");
+        return decoder.decode(new Uint8Array(stringPoolBytes.buffer, stringPoolBytes.byteOffset + offset + 2, len));
+    }
+
+    const triples = [];
+    const tripleStart = 52;
+    for (let i = 0; i < tripleCount; i++) {
+        const sOff = view.getUint32(tripleStart + i * 12, true);
+        const pOff = view.getUint32(tripleStart + i * 12 + 4, true);
+        const oOff = view.getUint32(tripleStart + i * 12 + 8, true);
+
+        triples.push({
+            subject: getString(sOff),
+            predicate: getString(pOff),
+            object: getString(oOff)
+        });
+    }
+
+    const result = { triples };
+    const peers = [];
+    triples.forEach(t => {
+        if (t.subject === "Action" && t.predicate === "type") {
+            result.type = t.object;
+        } else if (t.subject === "Peer" && t.predicate === "id") {
+            peers.push(t.object);
+        } else if (t.subject === "TargetPeer" && t.predicate === "peer_id") {
+            result.targetPeerId = t.object;
+        } else if (t.subject === "File" && t.predicate === "path") {
+            result.filePath = t.object;
+        } else if (t.subject === "File" && t.predicate === "hash") {
+            result.hashHex = t.object;
+        } else if (t.subject === "File" && t.predicate === "size") {
+            result.fileSize = parseInt(t.object);
+        } else if (t.subject === "File" && t.predicate === "id") {
+            result.fileId = t.object;
+        } else if (t.subject === "Crypto" && t.predicate === "key") {
+            result.keyHex = t.object;
+        } else if (t.subject === "Crypto" && t.predicate === "nonce") {
+            result.nonceHex = t.object;
+        } else if (t.subject === "Network" && t.predicate === "port") {
+            result.port = parseInt(t.object);
+        } else if (t.subject === "Network" && t.predicate === "ip") {
+            result.senderIp = t.object;
+        }
+    });
+
+    if (peers.length > 0) {
+        result.peers = peers;
+    }
+
+    return result;
+}
+
 // State management
 let ws = null;
 let peerConnections = {}; // targetPeerId -> RTCPeerConnection
@@ -46,7 +115,19 @@ function connectSignaling() {
     };
     
     ws.onmessage = async (event) => {
-        const msg = JSON.parse(event.data);
+        let msg;
+        if (event.data instanceof Blob) {
+            try {
+                const buffer = await event.data.arrayBuffer();
+                msg = parseNda(buffer);
+            } catch (e) {
+                console.error("Failed to parse binary NDA packet:", e);
+                return;
+            }
+        } else {
+            msg = JSON.parse(event.data);
+        }
+
         if (msg.type === 'peer_list') {
             updatePeerList(msg.peers);
         } else if (msg.sender && msg.sender !== myPeerId) {
