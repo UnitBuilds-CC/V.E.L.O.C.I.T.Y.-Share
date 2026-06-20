@@ -154,125 +154,151 @@ app.Map("/ws/share", async (HttpContext context) =>
     {
         while (webSocket.State == WebSocketState.Open)
         {
-            var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
-            if (result.MessageType == WebSocketMessageType.Close)
+            using (var ms = new MemoryStream())
             {
-                break;
-            }
-
-            if (result.MessageType == WebSocketMessageType.Text)
-            {
-                string rawMsg = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                try
+                WebSocketReceiveResult result;
+                long totalBytesRead = 0;
+                const long MaxMessageSize = 10 * 1024 * 1024; // 10MB limit
+                do
                 {
-                    var msgDoc = JsonDocument.Parse(rawMsg);
-                    string msgType = msgDoc.RootElement.TryGetProperty("type", out var typeProp) ? typeProp.GetString() ?? "" : "";
-                    
-                    if (msgType == "folder_sync_payload" && activeSyncEngine != null)
+                    result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                    if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        string innerData = msgDoc.RootElement.GetProperty("data").GetString() ?? "";
-                        var innerDoc = JsonDocument.Parse(innerData);
-                        string syncType = innerDoc.RootElement.GetProperty("type").GetString() ?? "";
-                        
-                        if (syncType == "sync_vctp_offer")
+                        break;
+                    }
+                    ms.Write(buffer, 0, result.Count);
+                    totalBytesRead += result.Count;
+                    if (totalBytesRead > MaxMessageSize)
+                    {
+                        await webSocket.CloseAsync(WebSocketCloseStatus.MessageTooBig, "Message exceeds size limit", CancellationToken.None);
+                        break;
+                    }
+                }
+                while (!result.EndOfMessage);
+
+                if (webSocket.State != WebSocketState.Open || result.MessageType == WebSocketMessageType.Close || totalBytesRead > MaxMessageSize)
+                {
+                    break;
+                }
+
+                if (result.MessageType == WebSocketMessageType.Text)
+                {
+                    ms.Seek(0, SeekOrigin.Begin);
+                    using (var reader = new StreamReader(ms, Encoding.UTF8))
+                    {
+                        string rawMsg = await reader.ReadToEndAsync();
+                        try
                         {
-                            string file = innerDoc.RootElement.GetProperty("file").GetString() ?? "";
-                            string hash = innerDoc.RootElement.GetProperty("hash").GetString() ?? "";
-                            Guid fileId = innerDoc.RootElement.GetProperty("fileId").GetGuid();
-                            byte[] key = Convert.FromBase64String(innerDoc.RootElement.GetProperty("key").GetString() ?? "");
-                            byte[] nonce = Convert.FromBase64String(innerDoc.RootElement.GetProperty("nonce").GetString() ?? "");
-
-                            string syncFolder = activeSyncEngine.SyncFolderPath;
-                            string targetDir = Path.GetDirectoryName(Path.Combine(syncFolder, file)) ?? syncFolder;
-
-                            var receiver = new VctpReceiver(targetDir, key, nonce, port: 0);
-                            activeReceivers[fileId] = receiver;
-
-                            receiver.OnTransferComplete += (filePath, fileHash) =>
+                            var msgDoc = JsonDocument.Parse(rawMsg);
+                            string msgType = msgDoc.RootElement.TryGetProperty("type", out var typeProp) ? typeProp.GetString() ?? "" : "";
+                            
+                            if (msgType == "folder_sync_payload" && activeSyncEngine != null)
                             {
-                                activeSyncEngine.ConfirmRemoteSyncCompleted(file, fileHash);
-                                receiver.Dispose();
-                                activeReceivers.TryRemove(fileId, out _);
-                                Console.WriteLine($"[Sync Engine] VCTP sync receiver complete for {file}");
-                            };
-                            receiver.Start();
-
-                            string senderPeer = msgDoc.RootElement.GetProperty("sender").GetString() ?? "";
-                            var acceptPayload = JsonSerializer.Serialize(new
-                            {
-                                type = "folder_sync_payload",
-                                sender = "local_sync_engine",
-                                target = senderPeer,
-                                data = JsonSerializer.Serialize(new
+                                string innerData = msgDoc.RootElement.GetProperty("data").GetString() ?? "";
+                                var innerDoc = JsonDocument.Parse(innerData);
+                                string syncType = innerDoc.RootElement.GetProperty("type").GetString() ?? "";
+                                
+                                if (syncType == "sync_vctp_offer")
                                 {
-                                    type = "sync_vctp_accept",
-                                    fileId = fileId,
-                                    port = receiver.Port
-                                })
-                            });
+                                    string file = innerDoc.RootElement.GetProperty("file").GetString() ?? "";
+                                    string hash = innerDoc.RootElement.GetProperty("hash").GetString() ?? "";
+                                    Guid fileId = innerDoc.RootElement.GetProperty("fileId").GetGuid();
+                                    byte[] key = Convert.FromBase64String(innerDoc.RootElement.GetProperty("key").GetString() ?? "");
+                                    byte[] nonce = Convert.FromBase64String(innerDoc.RootElement.GetProperty("nonce").GetString() ?? "");
 
-                            if (activePeers.TryGetValue(senderPeer, out var senderSocket) && senderSocket.State == WebSocketState.Open)
-                            {
-                                await senderSocket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(acceptPayload)), WebSocketMessageType.Text, true, CancellationToken.None);
-                                Console.WriteLine($"[Sync Engine] Dispatched sync_vctp_accept back to peer {senderPeer} on port {receiver.Port}");
-                            }
-                        }
-                        else if (syncType == "sync_vctp_accept")
-                        {
-                            Guid fileId = innerDoc.RootElement.GetProperty("fileId").GetGuid();
-                            int port = innerDoc.RootElement.GetProperty("port").GetInt32();
+                                    string syncFolder = activeSyncEngine.SyncFolderPath;
+                                    string targetDir = Path.GetDirectoryName(Path.Combine(syncFolder, file)) ?? syncFolder;
 
-                            if (activeSyncEngine.ActiveSyncTransfers.TryRemove(fileId, out var senderInfo))
-                            {
-                                var (key, nonce, fullPath, fileHash) = senderInfo;
-                                var remoteEP = new IPEndPoint(IPAddress.Loopback, port);
-                                _ = Task.Run(async () =>
-                                {
-                                    try
+                                    var receiver = new VctpReceiver(targetDir, key, nonce, port: 0);
+                                    activeReceivers[fileId] = receiver;
+
+                                    receiver.OnTransferComplete += (filePath, fileHash) =>
                                     {
-                                        using var vctpSender = new VctpSender(fullPath, fileId, fileHash, remoteEP, key, nonce, targetRateMbps: 1000.0);
-                                        await vctpSender.StartAsync();
-                                        Console.WriteLine($"[Sync Engine] VCTP sync sender complete for {fullPath}");
-                                    }
-                                    catch (Exception ex)
+                                        activeSyncEngine.ConfirmRemoteSyncCompleted(file, fileHash);
+                                        receiver.Dispose();
+                                        activeReceivers.TryRemove(fileId, out _);
+                                        Console.WriteLine($"[Sync Engine] VCTP sync receiver complete for {file}");
+                                    };
+                                    receiver.Start();
+
+                                    string senderPeer = msgDoc.RootElement.GetProperty("sender").GetString() ?? "";
+                                    var acceptPayload = JsonSerializer.Serialize(new
                                     {
-                                        Console.WriteLine($"[Sync Engine] VCTP sync sender failed: {ex.Message}");
+                                        type = "folder_sync_payload",
+                                        sender = "local_sync_engine",
+                                        target = senderPeer,
+                                        data = JsonSerializer.Serialize(new
+                                        {
+                                            type = "sync_vctp_accept",
+                                            fileId = fileId,
+                                            port = receiver.Port
+                                        })
+                                    });
+
+                                    if (activePeers.TryGetValue(senderPeer, out var senderSocket) && senderSocket.State == WebSocketState.Open)
+                                    {
+                                        await senderSocket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(acceptPayload)), WebSocketMessageType.Text, true, CancellationToken.None);
+                                        Console.WriteLine($"[Sync Engine] Dispatched sync_vctp_accept back to peer {senderPeer} on port {receiver.Port}");
                                     }
-                                });
-                            }
-                        }
-                        else
-                        {
-                            string file = innerDoc.RootElement.GetProperty("file").GetString() ?? "";
-                            string hash = innerDoc.RootElement.TryGetProperty("hash", out var hashProp) ? hashProp.GetString() ?? "" : "";
-                            byte[]? contentBytes = null;
-                            if (innerDoc.RootElement.TryGetProperty("content", out var contentProp))
-                            {
-                                string base64Content = contentProp.GetString() ?? "";
-                                if (!string.IsNullOrEmpty(base64Content))
+                                }
+                                else if (syncType == "sync_vctp_accept")
                                 {
-                                    contentBytes = Convert.FromBase64String(base64Content);
+                                    Guid fileId = innerDoc.RootElement.GetProperty("fileId").GetGuid();
+                                    int port = innerDoc.RootElement.GetProperty("port").GetInt32();
+
+                                    if (activeSyncEngine.ActiveSyncTransfers.TryRemove(fileId, out var senderInfo))
+                                    {
+                                        var (key, nonce, fullPath, fileHash) = senderInfo;
+                                        var remoteEP = new IPEndPoint(IPAddress.Loopback, port);
+                                        _ = Task.Run(async () =>
+                                        {
+                                            try
+                                            {
+                                                using var vctpSender = new VctpSender(fullPath, fileId, fileHash, remoteEP, key, nonce, targetRateMbps: 1000.0);
+                                                await vctpSender.StartAsync();
+                                                Console.WriteLine($"[Sync Engine] VCTP sync sender complete for {fullPath}");
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"[Sync Engine] VCTP sync sender failed: {ex.Message}");
+                                            }
+                                        });
+                                    }
+                                }
+                                else
+                                {
+                                    string file = innerDoc.RootElement.GetProperty("file").GetString() ?? "";
+                                    string hash = innerDoc.RootElement.TryGetProperty("hash", out var hashProp) ? hashProp.GetString() ?? "" : "";
+                                    byte[]? contentBytes = null;
+                                    if (innerDoc.RootElement.TryGetProperty("content", out var contentProp))
+                                    {
+                                        string base64Content = contentProp.GetString() ?? "";
+                                        if (!string.IsNullOrEmpty(base64Content))
+                                        {
+                                            contentBytes = Convert.FromBase64String(base64Content);
+                                        }
+                                    }
+
+                                    await activeSyncEngine.ApplyRemoteSyncAsync(syncType, file, hash, contentBytes);
+                                    Console.WriteLine($"[Sync Engine] Applied remote {syncType} for file {file}");
                                 }
                             }
 
-                            await activeSyncEngine.ApplyRemoteSyncAsync(syncType, file, hash, contentBytes);
-                            Console.WriteLine($"[Sync Engine] Applied remote {syncType} for file {file}");
+                            string target = msgDoc.RootElement.TryGetProperty("target", out var targetProp) ? targetProp.GetString() ?? "" : "";
+                            if (!string.IsNullOrEmpty(target) && activePeers.TryGetValue(target, out var targetSocket))
+                            {
+                                // Forward signaling/sync packet directly to recipient peer
+                                if (targetSocket.State == WebSocketState.Open)
+                                {
+                                    await targetSocket.SendAsync(new ArraySegment<byte>(ms.ToArray()), WebSocketMessageType.Text, true, CancellationToken.None);
+                                }
+                            }
                         }
-                    }
-
-                    string target = msgDoc.RootElement.TryGetProperty("target", out var targetProp) ? targetProp.GetString() ?? "" : "";
-                    if (!string.IsNullOrEmpty(target) && activePeers.TryGetValue(target, out var targetSocket))
-                    {
-                        // Forward signaling/sync packet directly to recipient peer
-                        if (targetSocket.State == WebSocketState.Open)
+                        catch (JsonException)
                         {
-                            await targetSocket.SendAsync(new ArraySegment<byte>(buffer, 0, result.Count), WebSocketMessageType.Text, true, CancellationToken.None);
+                            // Invalid JSON, ignore packet
                         }
                     }
-                }
-                catch (JsonException)
-                {
-                    // Invalid JSON, ignore packet
                 }
             }
         }

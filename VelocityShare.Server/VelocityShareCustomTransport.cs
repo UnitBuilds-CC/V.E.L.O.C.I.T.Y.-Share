@@ -2003,6 +2003,11 @@ namespace VelocityShare.Server
                     string fileName = initData.GetProperty("FileName").GetString() ?? "file.bin";
                     fileName = Path.GetFileName(fileName); // Prevent path traversal attacks by keeping only the filename
                     _fileSize = initData.GetProperty("FileSize").GetInt64();
+                    const long MaxFileSizeLimit = 50 * 1024 * 1024 * 1024L; // 50 GB limit
+                    if (_fileSize <= 0 || _fileSize > MaxFileSizeLimit)
+                    {
+                        throw new ArgumentException($"Invalid or unsupported file size: {_fileSize} bytes. Max allowed is 50 GB.");
+                    }
                     _expectedHash = initData.GetProperty("FileHash").GetString() ?? "";
 
                     _targetFilePath = Path.Combine(_targetFolder, fileName);
