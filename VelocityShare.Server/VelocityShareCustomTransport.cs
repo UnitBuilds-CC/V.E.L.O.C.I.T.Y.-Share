@@ -528,7 +528,7 @@ namespace VelocityShare.Server
             _providedAccessor = null;
             _directReceiver = null;
             _bypassCrypto = bypassCrypto;
-            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey, 16), trackAllValues: true);
 
             _fileSize = new FileInfo(filePath).Length;
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
@@ -561,7 +561,7 @@ namespace VelocityShare.Server
             _fileSize = fileSize;
             _directReceiver = null;
             _bypassCrypto = bypassCrypto;
-            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey, 16), trackAllValues: true);
 
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
@@ -593,7 +593,7 @@ namespace VelocityShare.Server
             _fileSize = fileSize;
             _directReceiver = directReceiver;
             _bypassCrypto = bypassCrypto;
-            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey, 16), trackAllValues: true);
 
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
@@ -624,7 +624,7 @@ namespace VelocityShare.Server
             _fileSize = fileSize;
             _directReceiver = directReceiver;
             _bypassCrypto = bypassCrypto;
-            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey, 16), trackAllValues: true);
 
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
@@ -1095,42 +1095,36 @@ namespace VelocityShare.Server
                                             int blockIndex = Interlocked.Increment(ref nextBlockToSend) - 1;
                                             if (blockIndex >= _totalBlocks) break;
 
-                                            if (!_metadata!.IsBlockCompleted(blockIndex))
+                                            long offset = (long)blockIndex * _blockSize;
+                                            int length = (int)Math.Min(_blockSize, _fileSize - offset);
+
+                                            pHeader->BlockIndex = (uint)blockIndex;
+                                            pHeader->PayloadLen = (ushort)(length + 16);
+
+                                            var aes = _threadLocalAes.Value;
+                                            if (!_bypassCrypto && aes != null)
                                             {
-                                                long offset = (long)blockIndex * _blockSize;
-                                                int length = (int)Math.Min(_blockSize, _fileSize - offset);
+                                                pBlockNonce[8] = (byte)blockIndex;
+                                                pBlockNonce[9] = (byte)(blockIndex >> 8);
+                                                pBlockNonce[10] = (byte)(blockIndex >> 16);
+                                                pBlockNonce[11] = (byte)(blockIndex >> 24);
 
-                                                pHeader->BlockIndex = (uint)blockIndex;
-                                                pHeader->PayloadLen = (ushort)(length + 16);
+                                                var plaintextSpan = new ReadOnlySpan<byte>(pMmf + offset, length);
+                                                var ciphertextSpan = new Span<byte>(pPayload, length);
+                                                var tagSpan = new Span<byte>(pPayload + length, 16);
+                                                var blockNonce = new ReadOnlySpan<byte>(pBlockNonce, 12);
 
-                                                var aes = _threadLocalAes.Value;
-                                                if (!_bypassCrypto && aes != null)
-                                                {
-                                                    pBlockNonce[8] = (byte)blockIndex;
-                                                    pBlockNonce[9] = (byte)(blockIndex >> 8);
-                                                    pBlockNonce[10] = (byte)(blockIndex >> 16);
-                                                    pBlockNonce[11] = (byte)(blockIndex >> 24);
-
-                                                    var plaintextSpan = new ReadOnlySpan<byte>(pMmf + offset, length);
-                                                    var ciphertextSpan = new Span<byte>(pPayload, length);
-                                                    var tagSpan = new Span<byte>(pPayload + length, 16);
-                                                    var blockNonce = new ReadOnlySpan<byte>(pBlockNonce, 12);
-
-                                                    aes.Encrypt(blockNonce, plaintextSpan, ciphertextSpan, tagSpan);
-                                                }
-                                                else
-                                                {
-                                                    Buffer.MemoryCopy(pMmf + offset, pPayload, length, length);
-                                                    byte* pTagLoc = pPayload + length;
-                                                    for (int j = 0; j < 16; j++) pTagLoc[j] = 0;
-                                                }
-
-                                                int packetSize = Marshal.SizeOf<VctpHeader>() + length + 16;
-                                                _socket.Send(sendBuffer, 0, packetSize, SocketFlags.None);
-                                                
-                                                _metadata.MarkBlockCompleted(blockIndex);
-                                                OnProgress?.Invoke(blockIndex + 1, _totalBlocks);
+                                                aes.Encrypt(blockNonce, plaintextSpan, ciphertextSpan, tagSpan);
                                             }
+                                            else
+                                            {
+                                                Buffer.MemoryCopy(pMmf + offset, pPayload, length, length);
+                                                byte* pTagLoc = pPayload + length;
+                                                for (int j = 0; j < 16; j++) pTagLoc[j] = 0;
+                                            }
+
+                                            int packetSize = Marshal.SizeOf<VctpHeader>() + length + 16;
+                                            _socket.Send(sendBuffer, 0, packetSize, SocketFlags.None);
                                         }
                                     }
                                 }
@@ -1147,6 +1141,7 @@ namespace VelocityShare.Server
                     }
 
                     Task.WaitAll(tasks);
+                    OnProgress?.Invoke(_totalBlocks, _totalBlocks);
                 }
                 else
                 {
@@ -1674,7 +1669,7 @@ namespace VelocityShare.Server
 
             int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
             _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
-            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey, 16), trackAllValues: true);
         }
 
         public VctpReceiver(MemoryMappedFile mmf, long fileSize, string targetFolder, byte[] cryptoKey, byte[] cryptoNonce, int port = 0, bool bypassCrypto = false)
@@ -1699,7 +1694,7 @@ namespace VelocityShare.Server
 
             int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
             _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
-            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey, 16), trackAllValues: true);
         }
 
         public VctpReceiver(MemoryMappedViewAccessor accessor, long fileSize, string targetFolder, byte[] cryptoKey, byte[] cryptoNonce, int port = 0, bool bypassCrypto = false)
@@ -1717,7 +1712,7 @@ namespace VelocityShare.Server
 
             int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
             _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
-            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey, 16), trackAllValues: true);
         }
 
         private void StartDecryptionWorkers()
@@ -2196,7 +2191,10 @@ namespace VelocityShare.Server
                 {
                     for (int k = _highestReceivedIndex + 1; k < index; k++)
                     {
-                        _pendingNacks.TryEnqueue(k);
+                        if (!_metadata.IsBlockCompleted(k))
+                        {
+                            _pendingNacks.TryEnqueue(k);
+                        }
                     }
                 }
 
@@ -2244,7 +2242,16 @@ namespace VelocityShare.Server
                 if (!duplicate && !_metadata!.IsBlockCompleted(missedIndex))
                 {
                     long lastNack = _lastNackTimestamps?[missedIndex] ?? 0;
-                    if (lastNack == 0 || (currentTimestamp - lastNack) > minIntervalTicks)
+                    if (lastNack == 0 && !force)
+                    {
+                        // First detection: just record timestamp and re-queue to allow out-of-order packets to arrive
+                        if (_lastNackTimestamps != null)
+                        {
+                            _lastNackTimestamps[missedIndex] = currentTimestamp;
+                        }
+                        _pendingNacks.TryEnqueue(missedIndex);
+                    }
+                    else if (force || (currentTimestamp - lastNack) > minIntervalTicks)
                     {
                         uniqueIndices[count] = missedIndex;
                         if (_lastNackTimestamps != null)
