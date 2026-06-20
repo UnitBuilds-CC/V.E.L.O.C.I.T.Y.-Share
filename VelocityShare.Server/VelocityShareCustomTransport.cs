@@ -510,7 +510,7 @@ namespace VelocityShare.Server
 
         private readonly VctpReceiver? _directReceiver;
         private readonly bool _bypassCrypto;
-        private readonly ThreadLocal<ChaCha20Poly1305?> _threadLocalChacha;
+        private readonly ThreadLocal<AesGcm?> _threadLocalAes;
 
         public event Action<int, int>? OnProgress;
         public event Action<string>? OnLog;
@@ -528,7 +528,7 @@ namespace VelocityShare.Server
             _providedAccessor = null;
             _directReceiver = null;
             _bypassCrypto = bypassCrypto;
-            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
 
             _fileSize = new FileInfo(filePath).Length;
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
@@ -561,7 +561,7 @@ namespace VelocityShare.Server
             _fileSize = fileSize;
             _directReceiver = null;
             _bypassCrypto = bypassCrypto;
-            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
 
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
@@ -593,7 +593,7 @@ namespace VelocityShare.Server
             _fileSize = fileSize;
             _directReceiver = directReceiver;
             _bypassCrypto = bypassCrypto;
-            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
 
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
@@ -624,7 +624,7 @@ namespace VelocityShare.Server
             _fileSize = fileSize;
             _directReceiver = directReceiver;
             _bypassCrypto = bypassCrypto;
-            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
 
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
@@ -1103,8 +1103,8 @@ namespace VelocityShare.Server
                                                 pHeader->BlockIndex = (uint)blockIndex;
                                                 pHeader->PayloadLen = (ushort)(length + 16);
 
-                                                var chacha = _threadLocalChacha.Value;
-                                                if (!_bypassCrypto && chacha != null)
+                                                var aes = _threadLocalAes.Value;
+                                                if (!_bypassCrypto && aes != null)
                                                 {
                                                     pBlockNonce[8] = (byte)blockIndex;
                                                     pBlockNonce[9] = (byte)(blockIndex >> 8);
@@ -1116,7 +1116,7 @@ namespace VelocityShare.Server
                                                     var tagSpan = new Span<byte>(pPayload + length, 16);
                                                     var blockNonce = new ReadOnlySpan<byte>(pBlockNonce, 12);
 
-                                                    chacha.Encrypt(blockNonce, plaintextSpan, ciphertextSpan, tagSpan);
+                                                    aes.Encrypt(blockNonce, plaintextSpan, ciphertextSpan, tagSpan);
                                                 }
                                                 else
                                                 {
@@ -1261,8 +1261,8 @@ namespace VelocityShare.Server
                 // Zero-copy plain read
                 byte* pMmf = (byte*)_mmfPtr.ToPointer();
 
-                var chacha = _threadLocalChacha.Value;
-                if (!_bypassCrypto && chacha != null)
+                var aes = _threadLocalAes.Value;
+                if (!_bypassCrypto && aes != null)
                 {
                     Span<byte> blockNonce = stackalloc byte[12];
                     _cryptoNonce.CopyTo(blockNonce);
@@ -1275,7 +1275,7 @@ namespace VelocityShare.Server
                     var ciphertextSpan = new Span<byte>(pCiphertext, length);
                     var tagSpan = new Span<byte>(pTag, 16);
 
-                    chacha.Encrypt(blockNonce, plaintextSpan, ciphertextSpan, tagSpan);
+                    aes.Encrypt(blockNonce, plaintextSpan, ciphertextSpan, tagSpan);
                 }
                 else
                 {
@@ -1554,13 +1554,13 @@ namespace VelocityShare.Server
             _cts.Cancel();
             CleanupSenderMmf();
             _socket?.Dispose();
-            if (_threadLocalChacha != null)
+            if (_threadLocalAes != null)
             {
-                foreach (var chacha in _threadLocalChacha.Values)
+                foreach (var aes in _threadLocalAes.Values)
                 {
-                    chacha?.Dispose();
+                    aes?.Dispose();
                 }
-                _threadLocalChacha.Dispose();
+                _threadLocalAes.Dispose();
             }
         }
     }
@@ -1608,7 +1608,7 @@ namespace VelocityShare.Server
         private VctpSender? _directSender;
         private readonly bool _bypassCrypto;
         private bool _connected = false;
-        private readonly ThreadLocal<ChaCha20Poly1305?> _threadLocalChacha;
+        private readonly ThreadLocal<AesGcm?> _threadLocalAes;
 
         public event Action<int, int>? OnProgress;
         public event Action<string>? OnLog;
@@ -1674,7 +1674,7 @@ namespace VelocityShare.Server
 
             int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
             _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
-            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
         }
 
         public VctpReceiver(MemoryMappedFile mmf, long fileSize, string targetFolder, byte[] cryptoKey, byte[] cryptoNonce, int port = 0, bool bypassCrypto = false)
@@ -1699,7 +1699,7 @@ namespace VelocityShare.Server
 
             int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
             _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
-            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
         }
 
         public VctpReceiver(MemoryMappedViewAccessor accessor, long fileSize, string targetFolder, byte[] cryptoKey, byte[] cryptoNonce, int port = 0, bool bypassCrypto = false)
@@ -1717,7 +1717,7 @@ namespace VelocityShare.Server
 
             int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
             _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
-            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
+            _threadLocalAes = new ThreadLocal<AesGcm?>(() => _bypassCrypto ? null : new AesGcm(_cryptoKey), trackAllValues: true);
         }
 
         private void StartDecryptionWorkers()
@@ -2155,8 +2155,8 @@ namespace VelocityShare.Server
 
             byte* pMmf = (byte*)_mmfPtr.ToPointer();
 
-            var chacha = _threadLocalChacha.Value;
-            if (!_bypassCrypto && chacha != null)
+            var aes = _threadLocalAes.Value;
+            if (!_bypassCrypto && aes != null)
             {
                 Span<byte> blockNonce = stackalloc byte[12];
                 _cryptoNonce.CopyTo(blockNonce);
@@ -2171,7 +2171,7 @@ namespace VelocityShare.Server
 
                 try
                 {
-                    chacha.Decrypt(blockNonce, ciphertextSpan, tagSpan, plaintextSpan);
+                    aes.Decrypt(blockNonce, ciphertextSpan, tagSpan, plaintextSpan);
                 }
                 catch (CryptographicException)
                 {
@@ -2435,13 +2435,13 @@ namespace VelocityShare.Server
             _flushTimer?.Dispose();
             CleanupReceiverMmf();
             _socket?.Dispose();
-            if (_threadLocalChacha != null)
+            if (_threadLocalAes != null)
             {
-                foreach (var chacha in _threadLocalChacha.Values)
+                foreach (var aes in _threadLocalAes.Values)
                 {
-                    chacha?.Dispose();
+                    aes?.Dispose();
                 }
-                _threadLocalChacha.Dispose();
+                _threadLocalAes.Dispose();
             }
         }
     }
