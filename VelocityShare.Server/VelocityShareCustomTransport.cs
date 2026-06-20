@@ -1773,13 +1773,17 @@ namespace VelocityShare.Server
 
             if (_directSender == null)
             {
-                var ioThread = new Thread(ReceiveThreadLoop)
+                int ioThreadsCount = Math.Max(2, Environment.ProcessorCount / 4);
+                for (int t = 0; t < ioThreadsCount; t++)
                 {
-                    IsBackground = true,
-                    Priority = ThreadPriority.Highest,
-                    Name = "VCTP-Receiver-IO"
-                };
-                ioThread.Start();
+                    var ioThread = new Thread(ReceiveThreadLoop)
+                    {
+                        IsBackground = true,
+                        Priority = ThreadPriority.Highest,
+                        Name = $"VCTP-Receiver-IO-{t}"
+                    };
+                    ioThread.Start();
+                }
 
                 StartDecryptionWorkers();
 
@@ -1987,75 +1991,78 @@ namespace VelocityShare.Server
         {
             try
             {
-                if (_metadata != null)
+                lock (_stateLock)
                 {
-                    OnLog?.Invoke($"[VCTP Receiver] Handshake received but session already initialized. Resending reply.");
-                    SendHandshakeReply();
-                    return;
-                }
-
-                _fileId = header.FileId;
-                var initData = JsonSerializer.Deserialize<JsonElement>(handshakeJson);
-
-                string fileName = initData.GetProperty("FileName").GetString() ?? "file.bin";
-                _fileSize = initData.GetProperty("FileSize").GetInt64();
-                _expectedHash = initData.GetProperty("FileHash").GetString() ?? "";
-
-                _targetFilePath = Path.Combine(_targetFolder, fileName);
-                _metaFilePath = _targetFilePath + ".vctmeta";
-                _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
-
-                _pendingNacks = new ZeroAllocIntQueue(_totalBlocks + 1024);
-                _lastNackTimestamps = new long[_totalBlocks];
-
-                OnLog?.Invoke($"[VCTP Receiver] Initializing session {_fileId} for file {fileName} ({_fileSize} bytes)");
-
-                if (_providedMmf == null && _providedAccessor == null)
-                {
-                    string? dir = Path.GetDirectoryName(_targetFilePath);
-                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    if (_metadata != null)
                     {
-                        Directory.CreateDirectory(dir);
+                        OnLog?.Invoke($"[VCTP Receiver] Handshake received but session already initialized. Resending reply.");
+                        SendHandshakeReply();
+                        return;
                     }
 
-                    using (var fs = new FileStream(_targetFilePath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite))
+                    _fileId = header.FileId;
+                    var initData = JsonSerializer.Deserialize<JsonElement>(handshakeJson);
+
+                    string fileName = initData.GetProperty("FileName").GetString() ?? "file.bin";
+                    _fileSize = initData.GetProperty("FileSize").GetInt64();
+                    _expectedHash = initData.GetProperty("FileHash").GetString() ?? "";
+
+                    _targetFilePath = Path.Combine(_targetFolder, fileName);
+                    _metaFilePath = _targetFilePath + ".vctmeta";
+                    _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
+
+                    _pendingNacks = new ZeroAllocIntQueue(_totalBlocks + 1024);
+                    _lastNackTimestamps = new long[_totalBlocks];
+
+                    OnLog?.Invoke($"[VCTP Receiver] Initializing session {_fileId} for file {fileName} ({_fileSize} bytes)");
+
+                    if (_providedMmf == null && _providedAccessor == null)
                     {
-                        fs.SetLength(_fileSize);
+                        string? dir = Path.GetDirectoryName(_targetFilePath);
+                        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        {
+                            Directory.CreateDirectory(dir);
+                        }
+
+                        using (var fs = new FileStream(_targetFilePath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite))
+                        {
+                            fs.SetLength(_fileSize);
+                        }
                     }
-                }
 
-                InitReceiverMmf();
+                    InitReceiverMmf();
 
-                if (_providedMmf == null && _providedAccessor == null && File.Exists(_metaFilePath))
-                {
-                    try
+                    if (_providedMmf == null && _providedAccessor == null && File.Exists(_metaFilePath))
                     {
-                        _metadata = VctpMetadata.Load(_metaFilePath);
-                        if (_metadata.FileId != _fileId || _metadata.FileSize != _fileSize)
+                        try
+                        {
+                            _metadata = VctpMetadata.Load(_metaFilePath);
+                            if (_metadata.FileId != _fileId || _metadata.FileSize != _fileSize)
+                            {
+                                _metadata = CreateNewMetadata();
+                            }
+                            else
+                            {
+                                OnLog?.Invoke($"[VCTP Receiver] Resuming existing sync session. Loading bitmap index.");
+                            }
+                        }
+                        catch
                         {
                             _metadata = CreateNewMetadata();
                         }
-                        else
-                        {
-                            OnLog?.Invoke($"[VCTP Receiver] Resuming existing sync session. Loading bitmap index.");
-                        }
                     }
-                    catch
+                    else
                     {
                         _metadata = CreateNewMetadata();
                     }
-                }
-                else
-                {
-                    _metadata = CreateNewMetadata();
-                }
 
-                _completedBlocks = 0;
-                for (int i = 0; i < _totalBlocks; i++)
-                {
-                    if (_metadata.IsBlockCompleted(i))
+                    _completedBlocks = 0;
+                    for (int i = 0; i < _totalBlocks; i++)
                     {
-                        _completedBlocks++;
+                        if (_metadata.IsBlockCompleted(i))
+                        {
+                            _completedBlocks++;
+                        }
                     }
                 }
 
