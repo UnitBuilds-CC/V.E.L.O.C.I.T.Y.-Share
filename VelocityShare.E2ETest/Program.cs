@@ -14,7 +14,7 @@ namespace VelocityShare.E2ETest
 {
     class Program
     {
-        private const string ServerUrl = "wss://52.188.14.216/ws/share";
+        private const string ServerUrl = "ws://127.0.0.1:5213/ws/share";
         private const string PeerA = "PeerA";
         private const string PeerB = "PeerB";
         private const string TestFileName = "e2e_test_file.bin";
@@ -209,13 +209,12 @@ namespace VelocityShare.E2ETest
                                 string innerData = doc.RootElement.GetProperty("data").GetString() ?? "";
                                 var innerDoc = JsonDocument.Parse(innerData);
                                 string syncType = innerDoc.RootElement.GetProperty("type").GetString() ?? "";
-
                                 if (syncType == "sync_vctp_accept")
                                 {
                                     Guid fid = innerDoc.RootElement.GetProperty("fileId").GetGuid();
                                     int port = innerDoc.RootElement.GetProperty("port").GetInt32();
-
-                                    var remoteEP = new IPEndPoint(IPAddress.Loopback, port);
+                                    string senderIp = doc.RootElement.TryGetProperty("senderIp", out var ipProp) ? ipProp.GetString() ?? "127.0.0.1" : "127.0.0.1";
+                                    var remoteEP = new IPEndPoint(IPAddress.Parse(senderIp), port);
                                     stopwatch.Start();
 
                                     _ = Task.Run(async () =>

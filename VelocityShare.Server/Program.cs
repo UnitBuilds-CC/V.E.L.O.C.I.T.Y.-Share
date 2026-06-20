@@ -290,7 +290,27 @@ app.Map("/ws/share", async (HttpContext context) =>
                                 // Forward signaling/sync packet directly to recipient peer
                                 if (targetSocket.State == WebSocketState.Open)
                                 {
-                                    await targetSocket.SendAsync(new ArraySegment<byte>(ms.ToArray()), WebSocketMessageType.Text, true, CancellationToken.None);
+                                    if (msgType == "folder_sync_payload")
+                                    {
+                                        string senderIp = context.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1";
+                                        if (senderIp == "::1" || senderIp == "127.0.0.1")
+                                        {
+                                            senderIp = "127.0.0.1";
+                                        }
+
+                                        var node = System.Text.Json.Nodes.JsonNode.Parse(rawMsg);
+                                        if (node != null)
+                                        {
+                                            node["senderIp"] = senderIp;
+                                            string modifiedMsg = node.ToJsonString();
+                                            byte[] modifiedBytes = Encoding.UTF8.GetBytes(modifiedMsg);
+                                            await targetSocket.SendAsync(new ArraySegment<byte>(modifiedBytes), WebSocketMessageType.Text, true, CancellationToken.None);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        await targetSocket.SendAsync(new ArraySegment<byte>(ms.ToArray()), WebSocketMessageType.Text, true, CancellationToken.None);
+                                    }
                                 }
                             }
                         }
