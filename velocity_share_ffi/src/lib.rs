@@ -1,5 +1,4 @@
-use chacha20poly1305::aead::{AeadInPlace, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Nonce, Tag};
+use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use sha2::{Digest, Sha256};
 use std::slice;
 
@@ -44,19 +43,23 @@ pub extern "C" fn encrypt_block_chacha(
         let data_slice = slice::from_raw_parts_mut(data_ptr, data_len);
         let tag_out = slice::from_raw_parts_mut(tag_out_ptr, 16);
 
-        let cipher = match ChaCha20Poly1305::new_from_slice(key_slice) {
-            Ok(c) => c,
+        let unbound_key = match UnboundKey::new(&CHACHA20_POLY1305, key_slice) {
+            Ok(k) => k,
             Err(_) => return -2,
         };
+        let less_safe_key = LessSafeKey::new(unbound_key);
 
-        let nonce = Nonce::from_slice(nonce_slice);
-
-        let tag = match cipher.encrypt_in_place_detached(nonce, &[], data_slice) {
-            Ok(t) => t,
+        let nonce = match Nonce::try_assume_unique_for_key(nonce_slice) {
+            Ok(n) => n,
             Err(_) => return -3,
         };
 
-        tag_out.copy_from_slice(&tag);
+        let tag = match less_safe_key.seal_in_place_separate_tag(nonce, Aad::empty(), data_slice) {
+            Ok(t) => t,
+            Err(_) => return -4,
+        };
+
+        tag_out.copy_from_slice(tag.as_ref());
     }
 
     0
@@ -77,20 +80,39 @@ pub extern "C" fn decrypt_block_chacha(
     unsafe {
         let key_slice = slice::from_raw_parts(key_ptr, 32);
         let nonce_slice = slice::from_raw_parts(nonce_ptr, 12);
-        let data_slice = slice::from_raw_parts_mut(data_ptr, data_len);
-        let tag_slice = slice::from_raw_parts(tag_ptr, 16);
+        let data_ptr_mut = data_ptr;
 
-        let cipher = match ChaCha20Poly1305::new_from_slice(key_slice) {
-            Ok(c) => c,
+        let unbound_key = match UnboundKey::new(&CHACHA20_POLY1305, key_slice) {
+            Ok(k) => k,
             Err(_) => return -2,
         };
+        let less_safe_key = LessSafeKey::new(unbound_key);
 
-        let nonce = Nonce::from_slice(nonce_slice);
-        let tag = Tag::from_slice(tag_slice);
+        let nonce = match Nonce::try_assume_unique_for_key(nonce_slice) {
+            Ok(n) => n,
+            Err(_) => return -3,
+        };
 
-        match cipher.decrypt_in_place_detached(nonce, &[], data_slice, tag) {
-            Ok(_) => 0,
-            Err(_) => -3,
+        if tag_ptr == data_ptr_mut.add(data_len) {
+            let in_out = slice::from_raw_parts_mut(data_ptr_mut, data_len + 16);
+            match less_safe_key.open_in_place(nonce, Aad::empty(), in_out) {
+                Ok(_) => 0,
+                Err(_) => -4,
+            }
+        } else {
+            let tag_slice = slice::from_raw_parts(tag_ptr, 16);
+            let data_slice = slice::from_raw_parts_mut(data_ptr_mut, data_len);
+            let mut temp = vec![0u8; data_len + 16];
+            temp[..data_len].copy_from_slice(data_slice);
+            temp[data_len..].copy_from_slice(tag_slice);
+            
+            match less_safe_key.open_in_place(nonce, Aad::empty(), &mut temp) {
+                Ok(plaintext) => {
+                    data_slice.copy_from_slice(&plaintext[..data_len]);
+                    0
+                }
+                Err(_) => -4,
+            }
         }
     }
 }

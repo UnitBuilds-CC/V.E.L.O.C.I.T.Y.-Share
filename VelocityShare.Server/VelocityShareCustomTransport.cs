@@ -499,6 +499,8 @@ namespace VelocityShare.Server
         private VctpMetadata? _metadata;
         private int _totalBlocks;
         private readonly ZeroAllocIntQueue _nackQueue;
+        private readonly TaskCompletionSource<bool> _handshakeReplyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _eofAckTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private bool _isFinished = false;
         private bool _receiverConfirmedComplete = false;
         private CancellationTokenSource _cts = new CancellationTokenSource();
@@ -711,16 +713,17 @@ namespace VelocityShare.Server
             }
 
             // Wait for Handshake Reply containing block bitmap
-            int timeoutCount = 0;
-            while (_metadata == null && timeoutCount < 100)
+            using (var timeoutCts = new CancellationTokenSource(5000))
+            using (timeoutCts.Token.Register(() => _handshakeReplyTcs.TrySetCanceled()))
             {
-                await Task.Delay(50);
-                timeoutCount++;
-            }
-
-            if (_metadata == null)
-            {
-                throw new TimeoutException("Failed to receive VCTP Handshake Reply from receiver.");
+                try
+                {
+                    await _handshakeReplyTcs.Task;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new TimeoutException("Failed to receive VCTP Handshake Reply from receiver within 5 seconds.");
+                }
             }
 
             // Start BBR-style pacing loop
@@ -1056,7 +1059,7 @@ namespace VelocityShare.Server
                 if (_targetRateMbps >= 10000.0)
                 {
                     // Lock-Free Parallel Blasting Mode!
-                    int numWorkers = _bypassCrypto ? 1 : Math.Max(2, Environment.ProcessorCount / 4);
+                    int numWorkers = Math.Max(4, Environment.ProcessorCount / 2);
                     int nextBlockToSend = 0;
                     Task[] tasks = new Task[numWorkers];
 
@@ -1225,8 +1228,8 @@ namespace VelocityShare.Server
                     SendEofPacket();
                     eofRetries++;
                     
-                    // Wait for ACK or NACK
-                    await Task.Delay(10);
+                    // Wait for EOF ACK or NACK (wake up instantly if EOF ACK arrives, otherwise wait up to 10ms)
+                    await Task.WhenAny(_eofAckTcs.Task, Task.Delay(10));
                 }
             }
 
@@ -1396,11 +1399,13 @@ namespace VelocityShare.Server
                         }
                     }
                     OnLog?.Invoke($"[VCTP Sender] Handshake completed. Bitmap indicates {GetCompletedCount(bitmap)} blocks already completed.");
+                    _handshakeReplyTcs.TrySetResult(true);
                 }
                 else if ((header.Flags & 0x08) != 0 && (header.Flags & 0x02) != 0)
                 {
                     // EOF Ack received from receiver
                     _receiverConfirmedComplete = true;
+                    _eofAckTcs.TrySetResult(true);
                     OnLog?.Invoke($"[VCTP Sender] Received EOF ACK from receiver.");
                 }
                 else if ((header.Flags & 0x02) != 0)
@@ -1848,15 +1853,16 @@ namespace VelocityShare.Server
                 }
                 else if ((header.Flags & 0x01) != 0) // Data packet
                 {
-                    if (_directSender != null || _bypassCrypto)
+                    if (_directSender != null)
                     {
-                        // Direct bypass or Zero-Crypto: process synchronously on this thread!
+                        // Direct bypass: process synchronously on this thread!
                         byte* pPayload = pBuffer + Marshal.SizeOf<VctpHeader>();
                         HandleDataPacket(header, pPayload);
                         ReturnBufferSafe(poolIndex);
                     }
                     else
                     {
+                        // Socket mode: always enqueue to decryption/copy workers to offload the I/O thread
                         if (!_decryptQueue.TryEnqueue(header, buffer, poolIndex))
                         {
                             ReturnBufferSafe(poolIndex);
