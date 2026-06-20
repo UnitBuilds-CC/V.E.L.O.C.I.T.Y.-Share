@@ -135,6 +135,13 @@ app.Map("/ws/share", async (HttpContext context) =>
         return;
     }
 
+    if (activePeers.TryGetValue(peerId, out var existingSocket) && existingSocket.State == WebSocketState.Open)
+    {
+        context.Response.StatusCode = StatusCodes.Status409Conflict;
+        await context.Response.WriteAsync("Peer ID is already online.");
+        return;
+    }
+
     using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
     activePeers[peerId] = webSocket;
     Console.WriteLine($"[WebSocket] Peer connected: {peerId}. Active peers: {activePeers.Count}");
