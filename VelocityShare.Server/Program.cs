@@ -612,7 +612,7 @@ app.MapGet("/api/share/test/vctp", async () =>
         };
 
         var resumeSw = System.Diagnostics.Stopwatch.StartNew();
-        using (var senderResume = new VctpSender(srcPath, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 10000.0))
+        using (var senderResume = new VctpSender(srcPath, fileId, srcHashHex, remoteEP, key, nonce, targetRateMbps: 2500.0))
         {
             senderResume.OnLog += (log) => { logs.Add($"[Sender Resume] {log}"); Console.WriteLine($"[Sender Resume] {log}"); };
             await senderResume.StartAsync();
