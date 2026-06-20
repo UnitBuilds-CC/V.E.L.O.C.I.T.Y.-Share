@@ -1293,6 +1293,8 @@ namespace VelocityShare.Server
 
         private void SendBlock(int index)
         {
+            if (index < 0 || index >= _totalBlocks) return;
+
             byte[] packetBytes = _bufferPool.Rent(out int poolIndex);
             int length;
             int packetSize;
@@ -1999,6 +2001,7 @@ namespace VelocityShare.Server
                     var initData = JsonSerializer.Deserialize<JsonElement>(handshakeJson);
 
                     string fileName = initData.GetProperty("FileName").GetString() ?? "file.bin";
+                    fileName = Path.GetFileName(fileName); // Prevent path traversal attacks by keeping only the filename
                     _fileSize = initData.GetProperty("FileSize").GetInt64();
                     _expectedHash = initData.GetProperty("FileHash").GetString() ?? "";
 
@@ -2136,6 +2139,7 @@ namespace VelocityShare.Server
             if (_metadata == null || _isFinished) return;
 
             int index = (int)header.BlockIndex;
+            if (index < 0 || index >= _totalBlocks) return;
             
             // Fast check outside lock
             if (_metadata.IsBlockCompleted(index)) return;
