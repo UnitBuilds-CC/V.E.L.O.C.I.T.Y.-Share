@@ -285,50 +285,38 @@ namespace VelocityShare.Server
     public class ZeroAllocBufferPool
     {
         private readonly byte[][] _buffers;
-        private readonly int[] _freeIndices;
-        private int _top;
+        private readonly ConcurrentStack<int> _freeIndices;
         private readonly int _capacity;
         private readonly int _bufferSize;
-        private readonly object _lock = new object();
 
         public ZeroAllocBufferPool(int capacity, int bufferSize)
         {
             _capacity = capacity;
             _bufferSize = bufferSize;
             _buffers = new byte[capacity][];
-            _freeIndices = new int[capacity];
+            _freeIndices = new ConcurrentStack<int>();
             for (int i = 0; i < capacity; i++)
             {
                 _buffers[i] = new byte[bufferSize];
-                _freeIndices[i] = i;
+                _freeIndices.Push(i);
             }
-            _top = capacity - 1;
         }
 
         public byte[] Rent(out int poolIndex)
         {
-            lock (_lock)
+            if (_freeIndices.TryPop(out int index))
             {
-                if (_top < 0)
-                {
-                    poolIndex = -1;
-                    return new byte[_bufferSize]; // Fallback if pool exhausted
-                }
-                int index = _freeIndices[_top];
-                _top--;
                 poolIndex = index;
                 return _buffers[index];
             }
+            poolIndex = -1;
+            return new byte[_bufferSize]; // Fallback if pool exhausted
         }
 
         public void Return(int poolIndex)
         {
             if (poolIndex < 0 || poolIndex >= _capacity) return;
-            lock (_lock)
-            {
-                _top++;
-                _freeIndices[_top] = poolIndex;
-            }
+            _freeIndices.Push(poolIndex);
         }
     }
 
@@ -520,6 +508,7 @@ namespace VelocityShare.Server
 
         private readonly VctpReceiver? _directReceiver;
         private readonly bool _bypassCrypto;
+        private readonly ThreadLocal<ChaCha20Poly1305?> _threadLocalChacha;
 
         public event Action<int, int>? OnProgress;
         public event Action<string>? OnLog;
@@ -537,6 +526,7 @@ namespace VelocityShare.Server
             _providedAccessor = null;
             _directReceiver = null;
             _bypassCrypto = bypassCrypto;
+            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
 
             _fileSize = new FileInfo(filePath).Length;
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
@@ -569,6 +559,7 @@ namespace VelocityShare.Server
             _fileSize = fileSize;
             _directReceiver = null;
             _bypassCrypto = bypassCrypto;
+            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
 
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
@@ -600,6 +591,7 @@ namespace VelocityShare.Server
             _fileSize = fileSize;
             _directReceiver = directReceiver;
             _bypassCrypto = bypassCrypto;
+            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
 
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
@@ -630,6 +622,7 @@ namespace VelocityShare.Server
             _fileSize = fileSize;
             _directReceiver = directReceiver;
             _bypassCrypto = bypassCrypto;
+            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
 
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
@@ -1063,7 +1056,7 @@ namespace VelocityShare.Server
                 if (_targetRateMbps >= 10000.0)
                 {
                     // Lock-Free Parallel Blasting Mode!
-                    int numWorkers = _bypassCrypto ? 1 : Math.Max(2, Environment.ProcessorCount / 2);
+                    int numWorkers = _bypassCrypto ? 1 : Math.Max(2, Environment.ProcessorCount / 4);
                     int nextBlockToSend = 0;
                     Task[] tasks = new Task[numWorkers];
 
@@ -1089,6 +1082,10 @@ namespace VelocityShare.Server
                                         byte* pPayload = pPacket + Marshal.SizeOf<VctpHeader>();
                                         byte* pMmf = (byte*)_mmfPtr.ToPointer();
                                         byte* pBlockNonce = stackalloc byte[12];
+                                        fixed (byte* pNonce = _cryptoNonce)
+                                        {
+                                            for (int j = 0; j < 8; j++) pBlockNonce[j] = pNonce[j];
+                                        }
 
                                         while (!_cts.IsCancellationRequested && !_isFinished)
                                         {
@@ -1103,26 +1100,24 @@ namespace VelocityShare.Server
                                                 pHeader->BlockIndex = (uint)blockIndex;
                                                 pHeader->PayloadLen = (ushort)(length + 16);
 
-                                                // Copy payload to packet buffer
-                                                Buffer.MemoryCopy(pMmf + offset, pPayload, length, length);
-
-                                                if (!_bypassCrypto)
+                                                var chacha = _threadLocalChacha.Value;
+                                                if (!_bypassCrypto && chacha != null)
                                                 {
-                                                    fixed (byte* pKey = _cryptoKey, pNonce = _cryptoNonce)
-                                                    {
-                                                        for (int j = 0; j < 8; j++) pBlockNonce[j] = pNonce[j];
-                                                        *(uint*)(pBlockNonce + 8) = (uint)blockIndex;
+                                                    pBlockNonce[8] = (byte)blockIndex;
+                                                    pBlockNonce[9] = (byte)(blockIndex >> 8);
+                                                    pBlockNonce[10] = (byte)(blockIndex >> 16);
+                                                    pBlockNonce[11] = (byte)(blockIndex >> 24);
 
-                                                        int res = VelocityShareCrypto.encrypt_block_chacha(pKey, pBlockNonce, pPayload, (nuint)length, pPayload + length);
-                                                        if (res != 0)
-                                                        {
-                                                            throw new InvalidOperationException($"FFI Encryption failed with code {res}");
-                                                        }
-                                                    }
+                                                    var plaintextSpan = new ReadOnlySpan<byte>(pMmf + offset, length);
+                                                    var ciphertextSpan = new Span<byte>(pPayload, length);
+                                                    var tagSpan = new Span<byte>(pPayload + length, 16);
+                                                    var blockNonce = new ReadOnlySpan<byte>(pBlockNonce, 12);
+
+                                                    chacha.Encrypt(blockNonce, plaintextSpan, ciphertextSpan, tagSpan);
                                                 }
                                                 else
                                                 {
-                                                    // Zero out the tag
+                                                    Buffer.MemoryCopy(pMmf + offset, pPayload, length, length);
                                                     byte* pTagLoc = pPayload + length;
                                                     for (int j = 0; j < 16; j++) pTagLoc[j] = 0;
                                                 }
@@ -1262,27 +1257,26 @@ namespace VelocityShare.Server
 
                 // Zero-copy plain read
                 byte* pMmf = (byte*)_mmfPtr.ToPointer();
-                Buffer.MemoryCopy(pMmf + offset, pCiphertext, length, length);
 
-                // Call Rust FFI ChaCha20-Poly1305 encryption in-place
-                if (!_bypassCrypto)
+                var chacha = _threadLocalChacha.Value;
+                if (!_bypassCrypto && chacha != null)
                 {
-                    fixed (byte* pKey = _cryptoKey, pNonce = _cryptoNonce)
-                    {
-                        byte* pBlockNonce = stackalloc byte[12];
-                        for (int j = 0; j < 8; j++) pBlockNonce[j] = pNonce[j];
-                        *(uint*)(pBlockNonce + 8) = (uint)index;
+                    Span<byte> blockNonce = stackalloc byte[12];
+                    _cryptoNonce.CopyTo(blockNonce);
+                    blockNonce[8] = (byte)index;
+                    blockNonce[9] = (byte)(index >> 8);
+                    blockNonce[10] = (byte)(index >> 16);
+                    blockNonce[11] = (byte)(index >> 24);
 
-                        int res = VelocityShareCrypto.encrypt_block_chacha(pKey, pBlockNonce, pCiphertext, (nuint)length, pTag);
-                        if (res != 0)
-                        {
-                            throw new InvalidOperationException($"FFI Encryption failed with code {res}");
-                        }
-                    }
+                    var plaintextSpan = new ReadOnlySpan<byte>(pMmf + offset, length);
+                    var ciphertextSpan = new Span<byte>(pCiphertext, length);
+                    var tagSpan = new Span<byte>(pTag, 16);
+
+                    chacha.Encrypt(blockNonce, plaintextSpan, ciphertextSpan, tagSpan);
                 }
                 else
                 {
-                    // Zero-out the tag block placeholder
+                    Buffer.MemoryCopy(pMmf + offset, pCiphertext, length, length);
                     for (int j = 0; j < 16; j++) pTag[j] = 0;
                 }
 
@@ -1555,6 +1549,14 @@ namespace VelocityShare.Server
             _cts.Cancel();
             CleanupSenderMmf();
             _socket?.Dispose();
+            if (_threadLocalChacha != null)
+            {
+                foreach (var chacha in _threadLocalChacha.Values)
+                {
+                    chacha?.Dispose();
+                }
+                _threadLocalChacha.Dispose();
+            }
         }
     }
 
@@ -1601,6 +1603,7 @@ namespace VelocityShare.Server
         private VctpSender? _directSender;
         private readonly bool _bypassCrypto;
         private bool _connected = false;
+        private readonly ThreadLocal<ChaCha20Poly1305?> _threadLocalChacha;
 
         public event Action<int, int>? OnProgress;
         public event Action<string>? OnLog;
@@ -1666,6 +1669,7 @@ namespace VelocityShare.Server
 
             int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
             _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
+            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
         }
 
         public VctpReceiver(MemoryMappedFile mmf, long fileSize, string targetFolder, byte[] cryptoKey, byte[] cryptoNonce, int port = 0, bool bypassCrypto = false)
@@ -1690,6 +1694,7 @@ namespace VelocityShare.Server
 
             int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
             _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
+            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
         }
 
         public VctpReceiver(MemoryMappedViewAccessor accessor, long fileSize, string targetFolder, byte[] cryptoKey, byte[] cryptoNonce, int port = 0, bool bypassCrypto = false)
@@ -1707,11 +1712,12 @@ namespace VelocityShare.Server
 
             int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
             _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
+            _threadLocalChacha = new ThreadLocal<ChaCha20Poly1305?>(() => _bypassCrypto ? null : new ChaCha20Poly1305(_cryptoKey), trackAllValues: true);
         }
 
         private void StartDecryptionWorkers()
         {
-            int numWorkers = Math.Max(2, Environment.ProcessorCount / 2);
+            int numWorkers = Math.Max(2, Environment.ProcessorCount / 4);
             for (int i = 0; i < numWorkers; i++)
             {
                 var thread = new Thread(() =>
@@ -1725,8 +1731,9 @@ namespace VelocityShare.Server
                             {
                                 unsafe
                                 {
-                                    fixed (byte* pPayload = item.Payload)
+                                    fixed (byte* pPacket = item.Payload)
                                     {
+                                        byte* pPayload = pPacket + Marshal.SizeOf<VctpHeader>();
                                         HandleDataPacket(item.Header, pPayload);
                                     }
                                 }
@@ -1800,7 +1807,7 @@ namespace VelocityShare.Server
             OnLog?.Invoke($"[VCTP Receiver] Verification check completed. Integrity guaranteed by block-level AEAD.");
         }
 
-        private unsafe void ProcessIncomingPacket(byte[] buffer, int bytesReceived, EndPoint remoteEP)
+        private unsafe void ProcessIncomingPacket(byte[] buffer, int bytesReceived, EndPoint remoteEP, int poolIndex = -1)
         {
             if (!_connected && _socket != null)
             {
@@ -1837,6 +1844,7 @@ namespace VelocityShare.Server
                     {
                         _ = Task.Run(() => HandleHandshakeAsync(header, handshakeJson));
                     }
+                    ReturnBufferSafe(poolIndex);
                 }
                 else if ((header.Flags & 0x01) != 0) // Data packet
                 {
@@ -1845,22 +1853,13 @@ namespace VelocityShare.Server
                         // Direct bypass or Zero-Crypto: process synchronously on this thread!
                         byte* pPayload = pBuffer + Marshal.SizeOf<VctpHeader>();
                         HandleDataPacket(header, pPayload);
+                        ReturnBufferSafe(poolIndex);
                     }
                     else
                     {
-                        byte[] payload = _bufferPool.Rent(out int poolIndex);
-                        try
+                        if (!_decryptQueue.TryEnqueue(header, buffer, poolIndex))
                         {
-                            Marshal.Copy((IntPtr)(pBuffer + Marshal.SizeOf<VctpHeader>()), payload, 0, header.PayloadLen);
-                            if (!_decryptQueue.TryEnqueue(header, payload, poolIndex))
-                            {
-                                _bufferPool.Return(poolIndex);
-                            }
-                        }
-                        catch
-                        {
-                            _bufferPool.Return(poolIndex);
-                            throw;
+                            ReturnBufferSafe(poolIndex);
                         }
                     }
                 }
@@ -1874,22 +1873,37 @@ namespace VelocityShare.Server
                     {
                         _ = Task.Run(() => HandleEofAsync(header));
                     }
+                    ReturnBufferSafe(poolIndex);
                 }
+                else
+                {
+                    ReturnBufferSafe(poolIndex);
+                }
+            }
+        }
+
+        private void ReturnBufferSafe(int poolIndex)
+        {
+            if (poolIndex >= 0)
+            {
+                _bufferPool.Return(poolIndex);
             }
         }
 
         public void ReceivePacketDirect(byte[] buffer, int bytesReceived)
         {
-            ProcessIncomingPacket(buffer, bytesReceived, new IPEndPoint(IPAddress.Loopback, 0));
+            ProcessIncomingPacket(buffer, bytesReceived, new IPEndPoint(IPAddress.Loopback, 0), -1);
         }
 
         private void ReceiveThreadLoop()
         {
-            byte[] buffer = new byte[65536 + 24 + 16];
             EndPoint senderRemoteEP = new IPEndPoint(IPAddress.Any, 0);
 
             while (!_cts.IsCancellationRequested && !_isFinished)
             {
+                int poolIndex;
+                byte[] buffer = _bufferPool.Rent(out poolIndex);
+
                 try
                 {
                     int bytesReceived;
@@ -1901,16 +1915,21 @@ namespace VelocityShare.Server
                     {
                         bytesReceived = _socket.ReceiveFrom(buffer, ref senderRemoteEP);
                     }
-                    if (bytesReceived <= 0) continue;
-                    ProcessIncomingPacket(buffer, bytesReceived, senderRemoteEP);
+                    if (bytesReceived <= 0)
+                    {
+                        ReturnBufferSafe(poolIndex);
+                        continue;
+                    }
+                    ProcessIncomingPacket(buffer, bytesReceived, senderRemoteEP, poolIndex);
                 }
                 catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset || ex.SocketErrorCode == SocketError.ConnectionRefused)
                 {
-                    // Ignore connection reset/refused from temporary sender disconnection and continue listening
+                    ReturnBufferSafe(poolIndex);
                     continue;
                 }
                 catch (Exception ex)
                 {
+                    ReturnBufferSafe(poolIndex);
                     if (!_isFinished && !_cts.IsCancellationRequested)
                     {
                         OnLog?.Invoke($"[VCTP Receiver] Receiver thread crashed: {ex.Message}");
@@ -2121,25 +2140,36 @@ namespace VelocityShare.Server
             byte* pCiphertext = pPayload;
             byte* pTag = pPayload + length;
 
-            if (!_bypassCrypto)
-            {
-                fixed (byte* pKey = _cryptoKey, pNonce = _cryptoNonce)
-                {
-                    byte* pBlockNonce = stackalloc byte[12];
-                    for (int j = 0; j < 8; j++) pBlockNonce[j] = pNonce[j];
-                    *(uint*)(pBlockNonce + 8) = (uint)index;
+            byte* pMmf = (byte*)_mmfPtr.ToPointer();
 
-                    int res = VelocityShareCrypto.decrypt_block_chacha(pKey, pBlockNonce, pCiphertext, (nuint)length, pTag);
-                    if (res != 0)
-                    {
-                        OnLog?.Invoke($"[VCTP Receiver] Decryption authentication failed on block {index}. Discarding.");
-                        return;
-                    }
+            var chacha = _threadLocalChacha.Value;
+            if (!_bypassCrypto && chacha != null)
+            {
+                Span<byte> blockNonce = stackalloc byte[12];
+                _cryptoNonce.CopyTo(blockNonce);
+                blockNonce[8] = (byte)index;
+                blockNonce[9] = (byte)(index >> 8);
+                blockNonce[10] = (byte)(index >> 16);
+                blockNonce[11] = (byte)(index >> 24);
+
+                var ciphertextSpan = new ReadOnlySpan<byte>(pCiphertext, length);
+                var plaintextSpan = new Span<byte>(pMmf + offset, length);
+                var tagSpan = new ReadOnlySpan<byte>(pTag, 16);
+
+                try
+                {
+                    chacha.Decrypt(blockNonce, ciphertextSpan, tagSpan, plaintextSpan);
+                }
+                catch (CryptographicException)
+                {
+                    OnLog?.Invoke($"[VCTP Receiver] Decryption authentication failed on block {index}. Discarding.");
+                    return;
                 }
             }
-
-            byte* pMmf = (byte*)_mmfPtr.ToPointer();
-            Buffer.MemoryCopy(pCiphertext, pMmf + offset, length, length);
+            else
+            {
+                Buffer.MemoryCopy(pCiphertext, pMmf + offset, length, length);
+            }
 
             lock (_stateLock)
             {
@@ -2392,6 +2422,14 @@ namespace VelocityShare.Server
             _flushTimer?.Dispose();
             CleanupReceiverMmf();
             _socket?.Dispose();
+            if (_threadLocalChacha != null)
+            {
+                foreach (var chacha in _threadLocalChacha.Values)
+                {
+                    chacha?.Dispose();
+                }
+                _threadLocalChacha.Dispose();
+            }
         }
     }
 }
