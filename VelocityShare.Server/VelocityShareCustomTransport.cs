@@ -288,11 +288,13 @@ namespace VelocityShare.Server
         private readonly int[] _freeIndices;
         private int _top;
         private readonly int _capacity;
+        private readonly int _bufferSize;
         private readonly object _lock = new object();
 
         public ZeroAllocBufferPool(int capacity, int bufferSize)
         {
             _capacity = capacity;
+            _bufferSize = bufferSize;
             _buffers = new byte[capacity][];
             _freeIndices = new int[capacity];
             for (int i = 0; i < capacity; i++)
@@ -310,7 +312,7 @@ namespace VelocityShare.Server
                 if (_top < 0)
                 {
                     poolIndex = -1;
-                    return new byte[32808]; // Fallback if pool exhausted
+                    return new byte[_bufferSize]; // Fallback if pool exhausted
                 }
                 int index = _freeIndices[_top];
                 _top--;
@@ -492,7 +494,7 @@ namespace VelocityShare.Server
         private readonly string _expectedHash;
         private readonly byte[] _cryptoKey;
         private readonly byte[] _cryptoNonce;
-        private readonly int _blockSize = 32768; // Optimized to 32KB
+        private readonly int _blockSize = 61440; // Optimized to 60KB
         private double _targetRateMbps;
         private long _ticksPerBlock;
         private long _lastAdjustmentTimestamp = 0;
@@ -540,12 +542,17 @@ namespace VelocityShare.Server
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            _socket.SendBufferSize = 16 * 1024 * 1024;
-            _socket.ReceiveBufferSize = 16 * 1024 * 1024;
+            _socket.SendBufferSize = 64 * 1024 * 1024;
+            _socket.ReceiveBufferSize = 64 * 1024 * 1024;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                try { _socket.IOControl((IOControlCode)(-1744830448), BitConverter.GetBytes(1), null); } catch { }
+            }
             _socket.Connect(_remoteEndPoint);
 
             _nackQueue = new ZeroAllocIntQueue(_totalBlocks + 1024);
-            _bufferPool = new ZeroAllocBufferPool(2048, 32808);
+            int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
+            _bufferPool = new ZeroAllocBufferPool(2048, bufferSize);
         }
 
         public VctpSender(MemoryMappedFile mmf, long fileSize, Guid fileId, string expectedHash, IPEndPoint remoteEndPoint, byte[] cryptoKey, byte[] cryptoNonce, double targetRateMbps = 500.0, bool bypassCrypto = false)
@@ -566,12 +573,17 @@ namespace VelocityShare.Server
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            _socket.SendBufferSize = 16 * 1024 * 1024;
-            _socket.ReceiveBufferSize = 16 * 1024 * 1024;
+            _socket.SendBufferSize = 64 * 1024 * 1024;
+            _socket.ReceiveBufferSize = 64 * 1024 * 1024;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                try { _socket.IOControl((IOControlCode)(-1744830448), BitConverter.GetBytes(1), null); } catch { }
+            }
             _socket.Connect(_remoteEndPoint);
 
             _nackQueue = new ZeroAllocIntQueue(_totalBlocks + 1024);
-            _bufferPool = new ZeroAllocBufferPool(2048, 32808);
+            int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
+            _bufferPool = new ZeroAllocBufferPool(2048, bufferSize);
         }
 
         public VctpSender(MemoryMappedFile mmf, long fileSize, Guid fileId, string expectedHash, VctpReceiver directReceiver, byte[] cryptoKey, byte[] cryptoNonce, double targetRateMbps = 500.0, bool bypassCrypto = false)
@@ -592,11 +604,16 @@ namespace VelocityShare.Server
             _totalBlocks = (int)Math.Ceiling((double)_fileSize / _blockSize);
 
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            _socket.SendBufferSize = 16 * 1024 * 1024;
-            _socket.ReceiveBufferSize = 16 * 1024 * 1024;
+            _socket.SendBufferSize = 64 * 1024 * 1024;
+            _socket.ReceiveBufferSize = 64 * 1024 * 1024;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                try { _socket.IOControl((IOControlCode)(-1744830448), BitConverter.GetBytes(1), null); } catch { }
+            }
 
             _nackQueue = new ZeroAllocIntQueue(_totalBlocks + 1024);
-            _bufferPool = new ZeroAllocBufferPool(2048, 32808);
+            int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
+            _bufferPool = new ZeroAllocBufferPool(2048, bufferSize);
         }
 
         public VctpSender(MemoryMappedViewAccessor accessor, long fileSize, Guid fileId, string expectedHash, VctpReceiver directReceiver, byte[] cryptoKey, byte[] cryptoNonce, double targetRateMbps = 500.0, bool bypassCrypto = false)
@@ -619,7 +636,8 @@ namespace VelocityShare.Server
             _socket = null!;
 
             _nackQueue = new ZeroAllocIntQueue(_totalBlocks + 1024);
-            _bufferPool = new ZeroAllocBufferPool(2048, 32808);
+            int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
+            _bufferPool = new ZeroAllocBufferPool(2048, bufferSize);
         }
 
         private unsafe void InitSenderMmf()
@@ -1041,36 +1059,127 @@ namespace VelocityShare.Server
             else
             {
                 UpdatePacingRate(_targetRateMbps);
-                long nextSendTime = Stopwatch.GetTimestamp();
-
-                // Start background encryption producer
-                StartEncryptionProducer();
-
-                // 1. Initial Blast Phase
-                try
+                
+                if (_targetRateMbps >= 10000.0)
                 {
-                    int itemIndex;
-                    byte[] itemBuffer;
-                    int itemLength;
-                    int itemPoolIndex;
+                    // Lock-Free Parallel Blasting Mode!
+                    int numWorkers = _bypassCrypto ? 1 : Math.Max(2, Environment.ProcessorCount / 2);
+                    int nextBlockToSend = 0;
+                    Task[] tasks = new Task[numWorkers];
 
-                    while (_packetQueue.TryDequeue(out itemIndex, out itemBuffer, out itemLength, out itemPoolIndex, _cts.Token))
+                    for (int w = 0; w < numWorkers; w++)
                     {
-                        if (_cts.IsCancellationRequested || _isFinished)
+                        int workerId = w;
+                        tasks[workerId] = Task.Run(() =>
                         {
-                            _bufferPool.Return(itemPoolIndex);
-                            break;
-                        }
+                            var prevAffinity = ThreadAffinityHelper.PinThread(workerId, "p_cores");
+                            int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
+                            byte[] sendBuffer = new byte[bufferSize];
+                            
+                            try
+                            {
+                                unsafe
+                                {
+                                    fixed (byte* pPacket = sendBuffer)
+                                    {
+                                        VctpHeader* pHeader = (VctpHeader*)pPacket;
+                                        pHeader->FileId = _fileId;
+                                        pHeader->Flags = 0x01; // Data
+                                        
+                                        byte* pPayload = pPacket + Marshal.SizeOf<VctpHeader>();
+                                        byte* pMmf = (byte*)_mmfPtr.ToPointer();
+                                        byte* pBlockNonce = stackalloc byte[12];
 
-                        // Process pending NACKs first
-                        while (_nackQueue.TryDequeue(out int nackIndex))
-                        {
-                            SendBlock(nackIndex);
-                        }
+                                        while (!_cts.IsCancellationRequested && !_isFinished)
+                                        {
+                                            int blockIndex = Interlocked.Increment(ref nextBlockToSend) - 1;
+                                            if (blockIndex >= _totalBlocks) break;
 
-                        // Wait until it is time to pace the next packet
-                        if (_targetRateMbps < 10000.0)
+                                            if (!_metadata!.IsBlockCompleted(blockIndex))
+                                            {
+                                                long offset = (long)blockIndex * _blockSize;
+                                                int length = (int)Math.Min(_blockSize, _fileSize - offset);
+
+                                                pHeader->BlockIndex = (uint)blockIndex;
+                                                pHeader->PayloadLen = (ushort)(length + 16);
+
+                                                // Copy payload to packet buffer
+                                                Buffer.MemoryCopy(pMmf + offset, pPayload, length, length);
+
+                                                if (!_bypassCrypto)
+                                                {
+                                                    fixed (byte* pKey = _cryptoKey, pNonce = _cryptoNonce)
+                                                    {
+                                                        for (int j = 0; j < 8; j++) pBlockNonce[j] = pNonce[j];
+                                                        *(uint*)(pBlockNonce + 8) = (uint)blockIndex;
+
+                                                        int res = VelocityShareCrypto.encrypt_block_chacha(pKey, pBlockNonce, pPayload, (nuint)length, pPayload + length);
+                                                        if (res != 0)
+                                                        {
+                                                            throw new InvalidOperationException($"FFI Encryption failed with code {res}");
+                                                        }
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    // Zero out the tag
+                                                    byte* pTagLoc = pPayload + length;
+                                                    for (int j = 0; j < 16; j++) pTagLoc[j] = 0;
+                                                }
+
+                                                int packetSize = Marshal.SizeOf<VctpHeader>() + length + 16;
+                                                _socket.Send(sendBuffer, 0, packetSize, SocketFlags.None);
+                                                
+                                                _metadata.MarkBlockCompleted(blockIndex);
+                                                OnProgress?.Invoke(blockIndex + 1, _totalBlocks);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                OnLog?.Invoke($"[VCTP Sender Blaster Worker] Error: {ex.Message}");
+                            }
+                            finally
+                            {
+                                ThreadAffinityHelper.RestoreAffinity(prevAffinity);
+                            }
+                        });
+                    }
+
+                    Task.WaitAll(tasks);
+                }
+                else
+                {
+                    long nextSendTime = Stopwatch.GetTimestamp();
+
+                    // Start background encryption producer
+                    StartEncryptionProducer();
+
+                    // 1. Initial Blast Phase
+                    try
+                    {
+                        int itemIndex;
+                        byte[] itemBuffer;
+                        int itemLength;
+                        int itemPoolIndex;
+
+                        while (_packetQueue.TryDequeue(out itemIndex, out itemBuffer, out itemLength, out itemPoolIndex, _cts.Token))
                         {
+                            if (_cts.IsCancellationRequested || _isFinished)
+                            {
+                                _bufferPool.Return(itemPoolIndex);
+                                break;
+                            }
+
+                            // Process pending NACKs first
+                            while (_nackQueue.TryDequeue(out int nackIndex))
+                            {
+                                SendBlock(nackIndex);
+                            }
+
+                            // Wait until it is time to pace the next packet
                             while (Stopwatch.GetTimestamp() < nextSendTime)
                             {
                                 int remainingMs = (int)((nextSendTime - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency);
@@ -1083,27 +1192,27 @@ namespace VelocityShare.Server
                                     Thread.SpinWait(10);
                                 }
                             }
+
+                            if (_directReceiver != null)
+                            {
+                                _directReceiver.ReceivePacketDirect(itemBuffer, itemLength);
+                            }
+                            else
+                            {
+                                _socket.Send(itemBuffer, 0, itemLength, SocketFlags.None);
+                            }
+                            RecordPacketSent();
+
+                            _metadata!.MarkBlockCompleted(itemIndex);
+                            OnProgress?.Invoke(itemIndex + 1, _totalBlocks);
+
+                            _bufferPool.Return(itemPoolIndex);
+
+                            nextSendTime += _ticksPerBlock;
                         }
-
-                        if (_directReceiver != null)
-                        {
-                            _directReceiver.ReceivePacketDirect(itemBuffer, itemLength);
-                        }
-                        else
-                        {
-                            _socket.Send(itemBuffer, 0, itemLength, SocketFlags.None);
-                        }
-                        RecordPacketSent();
-
-                        _metadata!.MarkBlockCompleted(itemIndex);
-                        OnProgress?.Invoke(itemIndex + 1, _totalBlocks);
-
-                        _bufferPool.Return(itemPoolIndex);
-
-                        nextSendTime += _ticksPerBlock;
                     }
+                    catch (OperationCanceledException) { }
                 }
-                catch (OperationCanceledException) { }
             }
 
             // 2. Retransmission & Verification Phase
@@ -1455,7 +1564,7 @@ namespace VelocityShare.Server
         private readonly string _targetFolder;
         private readonly byte[] _cryptoKey;
         private readonly byte[] _cryptoNonce;
-        private readonly int _blockSize = 32768; // Optimized to 32KB
+        private readonly int _blockSize = 61440; // Optimized to 60KB
         private readonly MemoryMappedFile? _providedMmf;
         private readonly MemoryMappedViewAccessor? _providedAccessor;
 
@@ -1486,11 +1595,12 @@ namespace VelocityShare.Server
         private System.Threading.Timer? _nackTimer;
         private System.Threading.Timer? _flushTimer;
         private readonly ZeroAllocDecryptQueue _decryptQueue = new ZeroAllocDecryptQueue(4096);
-        private readonly ZeroAllocBufferPool _bufferPool = new ZeroAllocBufferPool(4096, 32808);
+        private readonly ZeroAllocBufferPool _bufferPool;
         private readonly object _stateLock = new object();
 
         private VctpSender? _directSender;
         private readonly bool _bypassCrypto;
+        private bool _connected = false;
 
         public event Action<int, int>? OnProgress;
         public event Action<string>? OnLog;
@@ -1545,10 +1655,17 @@ namespace VelocityShare.Server
             _bypassCrypto = bypassCrypto;
 
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            _socket.SendBufferSize = 16 * 1024 * 1024;
-            _socket.ReceiveBufferSize = 16 * 1024 * 1024;
+            _socket.SendBufferSize = 64 * 1024 * 1024;
+            _socket.ReceiveBufferSize = 64 * 1024 * 1024;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                try { _socket.IOControl((IOControlCode)(-1744830448), BitConverter.GetBytes(1), null); } catch { }
+            }
             _socket.Bind(new IPEndPoint(IPAddress.Any, port));
             this.Port = ((IPEndPoint)_socket.LocalEndPoint!).Port;
+
+            int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
+            _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
         }
 
         public VctpReceiver(MemoryMappedFile mmf, long fileSize, string targetFolder, byte[] cryptoKey, byte[] cryptoNonce, int port = 0, bool bypassCrypto = false)
@@ -1562,10 +1679,17 @@ namespace VelocityShare.Server
             _bypassCrypto = bypassCrypto;
 
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            _socket.SendBufferSize = 16 * 1024 * 1024;
-            _socket.ReceiveBufferSize = 16 * 1024 * 1024;
+            _socket.SendBufferSize = 64 * 1024 * 1024;
+            _socket.ReceiveBufferSize = 64 * 1024 * 1024;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                try { _socket.IOControl((IOControlCode)(-1744830448), BitConverter.GetBytes(1), null); } catch { }
+            }
             _socket.Bind(new IPEndPoint(IPAddress.Any, port));
             this.Port = ((IPEndPoint)_socket.LocalEndPoint!).Port;
+
+            int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
+            _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
         }
 
         public VctpReceiver(MemoryMappedViewAccessor accessor, long fileSize, string targetFolder, byte[] cryptoKey, byte[] cryptoNonce, int port = 0, bool bypassCrypto = false)
@@ -1580,6 +1704,9 @@ namespace VelocityShare.Server
 
             _socket = null!;
             this.Port = 0;
+
+            int bufferSize = Marshal.SizeOf<VctpHeader>() + _blockSize + 16;
+            _bufferPool = new ZeroAllocBufferPool(4096, bufferSize);
         }
 
         private void StartDecryptionWorkers()
@@ -1675,6 +1802,25 @@ namespace VelocityShare.Server
 
         private unsafe void ProcessIncomingPacket(byte[] buffer, int bytesReceived, EndPoint remoteEP)
         {
+            if (!_connected && _socket != null)
+            {
+                lock (_stateLock)
+                {
+                    if (!_connected)
+                    {
+                        _senderEndPoint = (IPEndPoint)remoteEP;
+                        try
+                        {
+                            _socket.Connect(_senderEndPoint);
+                            _connected = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            OnLog?.Invoke($"[Receiver] Connect to sender failed: {ex.Message}");
+                        }
+                    }
+                }
+            }
             _senderEndPoint = (IPEndPoint)remoteEP;
             fixed (byte* pBuffer = buffer)
             {
@@ -1694,9 +1840,9 @@ namespace VelocityShare.Server
                 }
                 else if ((header.Flags & 0x01) != 0) // Data packet
                 {
-                    if (_directSender != null)
+                    if (_directSender != null || _bypassCrypto)
                     {
-                        // Direct bypass: process synchronously on this thread!
+                        // Direct bypass or Zero-Crypto: process synchronously on this thread!
                         byte* pPayload = pBuffer + Marshal.SizeOf<VctpHeader>();
                         HandleDataPacket(header, pPayload);
                     }
@@ -1746,7 +1892,15 @@ namespace VelocityShare.Server
             {
                 try
                 {
-                    int bytesReceived = _socket.ReceiveFrom(buffer, ref senderRemoteEP);
+                    int bytesReceived;
+                    if (_connected)
+                    {
+                        bytesReceived = _socket.Receive(buffer, SocketFlags.None);
+                    }
+                    else
+                    {
+                        bytesReceived = _socket.ReceiveFrom(buffer, ref senderRemoteEP);
+                    }
                     if (bytesReceived <= 0) continue;
                     ProcessIncomingPacket(buffer, bytesReceived, senderRemoteEP);
                 }
@@ -1935,6 +2089,10 @@ namespace VelocityShare.Server
                 {
                     _directSender.ReceivePacketDirect(packetBytes, packetSize);
                 }
+                else if (_connected)
+                {
+                    _socket.Send(packetBytes, 0, packetSize, SocketFlags.None);
+                }
                 else
                 {
                     _socket.SendTo(packetBytes, 0, packetSize, SocketFlags.None, _senderEndPoint!);
@@ -2088,6 +2246,10 @@ namespace VelocityShare.Server
                 {
                     _directSender.ReceivePacketDirect(packetBytes, packetSize);
                 }
+                else if (_connected)
+                {
+                    _socket.Send(packetBytes, 0, packetSize, SocketFlags.None);
+                }
                 else
                 {
                     _socket.SendTo(packetBytes, 0, packetSize, SocketFlags.None, _senderEndPoint!);
@@ -2150,6 +2312,10 @@ namespace VelocityShare.Server
                 if (_directSender != null)
                 {
                     _directSender.ReceivePacketDirect(packetBytes, packetSize);
+                }
+                else if (_connected)
+                {
+                    _socket.Send(packetBytes, 0, packetSize, SocketFlags.None);
                 }
                 else
                 {

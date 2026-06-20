@@ -18,7 +18,7 @@ namespace VelocityShare.E2ETest
         private const string PeerA = "PeerA";
         private const string PeerB = "PeerB";
         private const string TestFileName = "e2e_test_file.bin";
-        private const int FileSize = 10 * 1024 * 1024; // 10MB file for fast verification
+        private const int FileSize = 100 * 1024 * 1024; // 100MB file
 
         static async Task Main(string[] args)
         {
@@ -26,34 +26,81 @@ namespace VelocityShare.E2ETest
             Console.WriteLine("          V.E.L.O.C.I.T.Y. Share Client-to-Client E2E Test");
             Console.WriteLine("=====================================================================");
 
-            // 1. Prepare temp directories
-            string tempDir = Path.Combine(Path.GetTempPath(), "VelocityShare_E2E_" + Guid.NewGuid().ToString().Substring(0, 8));
-            string dirA = Path.Combine(tempDir, "PeerA");
-            string dirB = Path.Combine(tempDir, "PeerB");
-            Directory.CreateDirectory(dirA);
-            Directory.CreateDirectory(dirB);
-
-            // Generate test file in dirA
-            string srcFilePath = Path.Combine(dirA, TestFileName);
+            // Generate test data and load it into source MMF
             byte[] srcBytes = new byte[FileSize];
             Random.Shared.NextBytes(srcBytes);
-            File.WriteAllBytes(srcFilePath, srcBytes);
 
             byte[] expectedHashBytes = SHA256.HashData(srcBytes);
             string expectedHashHex = Convert.ToHexString(expectedHashBytes).ToLowerInvariant();
 
-            Console.WriteLine($"[Init] Generated {FileSize / (1024.0 * 1024.0):F2}MB file in {dirA}");
+            using var srcMmf = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateNew(null, FileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.ReadWrite);
+            using (var accessor = srcMmf.CreateViewAccessor(0, FileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Write))
+            {
+                accessor.WriteArray(0, srcBytes, 0, srcBytes.Length);
+            }
+
+            Console.WriteLine($"[Init] Generated {FileSize / (1024.0 * 1024.0):F2}MB file in-memory MMF.");
             Console.WriteLine($"[Init] Expected Hash: {expectedHashHex}");
 
-            // Generate crypto credentials for VCTP
+            // Run Phase 1: Cryptographic P2P Mode (No pacing, 100Gbps target)
+            double speedCrypto = await RunTestPhase(srcMmf, expectedHashHex, bypassCrypto: false);
+
+            // Cool-down delay to let socket resources clear on server
+            await Task.Delay(1000);
+
+            // Run Phase 2: Zero-Crypto P2P Mode (No pacing, 100Gbps target)
+            double speedNoCrypto = await RunTestPhase(srcMmf, expectedHashHex, bypassCrypto: true);
+
+            Console.WriteLine("---------------------------------------------------------------------");
+            Console.WriteLine("                  VCTP E2E BENCHMARK COMPARISON                      ");
+            Console.WriteLine("---------------------------------------------------------------------");
+            Console.WriteLine($"Phase 1: Cryptographic P2P Mode : {speedCrypto:F2} MB/s ({speedCrypto * 8.0:F2} Mbps)");
+            Console.WriteLine($"Phase 2: Zero-Crypto P2P Mode    : {speedNoCrypto:F2} MB/s ({speedNoCrypto * 8.0:F2} Mbps)");
+            Console.WriteLine("=====================================================================");
+        }
+
+        private static async Task<double> RunTestPhase(System.IO.MemoryMappedFiles.MemoryMappedFile srcMmf, string expectedHashHex, bool bypassCrypto)
+        {
+            string label = bypassCrypto ? "Zero-Crypto P2P Mode" : "Cryptographic P2P Mode";
+            Console.WriteLine($"\n--- Starting Run: {label} ---");
+
+            // Create in-memory destination MMF
+            using var destMmf = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateNew(null, FileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.ReadWrite);
+
+            // Pre-touch / Warm both source and destination memory pages to allocate physical RAM and prevent page faults during the test!
+            using (var srcAccessor = srcMmf.CreateViewAccessor(0, FileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read))
+            using (var destAccessor = destMmf.CreateViewAccessor(0, FileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.ReadWrite))
+            {
+                unsafe
+                {
+                    byte* pSrc = null;
+                    byte* pDest = null;
+                    srcAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pSrc);
+                    destAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pDest);
+                    try
+                    {
+                        byte sum = 0;
+                        for (long offset = 0; offset < FileSize; offset += 4096)
+                        {
+                            sum ^= pSrc[offset];
+                            pDest[offset] = 0;
+                        }
+                        if (sum == 42) GC.KeepAlive(sum);
+                    }
+                    finally
+                    {
+                        srcAccessor.SafeMemoryMappedViewHandle.ReleasePointer();
+                        destAccessor.SafeMemoryMappedViewHandle.ReleasePointer();
+                    }
+                }
+            }
+
             byte[] vctpKey = new byte[32];
             byte[] vctpNonce = new byte[12];
             Random.Shared.NextBytes(vctpKey);
             Random.Shared.NextBytes(vctpNonce);
             Guid fileId = Guid.NewGuid();
 
-            // 2. Establish connections to Azure VM Signaling Hub
-            Console.WriteLine("[Network] Connecting Peer A & Peer B to VM Signaling Server...");
             using var wsA = new ClientWebSocket();
             wsA.Options.SetRequestHeader("Host", "share.unitbuilds.com");
             wsA.Options.RemoteCertificateValidationCallback = (sender, cert, chain, sslPolicyErrors) => true;
@@ -68,13 +115,11 @@ namespace VelocityShare.E2ETest
             {
                 await wsA.ConnectAsync(new Uri($"{ServerUrl}?peerId={PeerA}"), cts.Token);
                 await wsB.ConnectAsync(new Uri($"{ServerUrl}?peerId={PeerB}"), cts.Token);
-                Console.WriteLine("[Network] Peer A & Peer B WebSockets connected successfully.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[Network] ERROR: WebSocket connection failed. Details: {ex.Message}");
-                CleanupDirs(tempDir);
-                return;
+                Console.WriteLine($"[Network] ERROR: WebSocket connection failed: {ex.Message}");
+                return 0;
             }
 
             var tcs = new TaskCompletionSource<bool>();
@@ -83,7 +128,6 @@ namespace VelocityShare.E2ETest
             VctpSender? activeSender = null;
             var stopwatch = new Stopwatch();
 
-            // 3. Start Peer B receiver message loop
             var peerBTask = Task.Run(async () =>
             {
                 var buffer = new byte[1024 * 64];
@@ -107,23 +151,19 @@ namespace VelocityShare.E2ETest
                                 if (syncType == "sync_vctp_offer")
                                 {
                                     string file = innerDoc.RootElement.GetProperty("file").GetString() ?? "";
-                                    string hash = innerDoc.RootElement.GetProperty("hash").GetString() ?? "";
                                     Guid fid = innerDoc.RootElement.GetProperty("fileId").GetGuid();
                                     byte[] key = Convert.FromBase64String(innerDoc.RootElement.GetProperty("key").GetString() ?? "");
                                     byte[] nonce = Convert.FromBase64String(innerDoc.RootElement.GetProperty("nonce").GetString() ?? "");
 
-                                    Console.WriteLine($"[Peer B] Received VCTP Offer for file: {file}");
-
-                                    activeReceiver = new VctpReceiver(dirB, key, nonce, port: 0);
+                                    activeReceiver = new VctpReceiver(destMmf, FileSize, "", key, nonce, port: 0, bypassCrypto: bypassCrypto);
+                                    activeReceiver.OnLog += (logMsg) => Console.WriteLine($"[Receiver Log] {logMsg}");
                                     activeReceiver.OnTransferComplete += (filePath, fileHash) =>
                                     {
                                         finalDestHash = fileHash;
                                         tcs.TrySetResult(true);
                                     };
                                     activeReceiver.Start();
-                                    Console.WriteLine($"[Peer B] Started VctpReceiver on port {activeReceiver.Port}");
 
-                                    // Send sync_vctp_accept back to Peer A
                                     var acceptEnvelope = JsonSerializer.Serialize(new
                                     {
                                         type = "folder_sync_payload",
@@ -138,7 +178,6 @@ namespace VelocityShare.E2ETest
                                     });
 
                                     await wsB.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(acceptEnvelope)), WebSocketMessageType.Text, true, cts.Token);
-                                    Console.WriteLine($"[Peer B] Dispatched sync_vctp_accept back to Peer A on port {activeReceiver.Port}");
                                 }
                             }
                         }
@@ -151,7 +190,6 @@ namespace VelocityShare.E2ETest
                 }
             });
 
-            // 4. Start Peer A sender message loop
             var peerATask = Task.Run(async () =>
             {
                 var buffer = new byte[1024 * 64];
@@ -177,8 +215,6 @@ namespace VelocityShare.E2ETest
                                     Guid fid = innerDoc.RootElement.GetProperty("fileId").GetGuid();
                                     int port = innerDoc.RootElement.GetProperty("port").GetInt32();
 
-                                    Console.WriteLine($"[Peer A] Received VCTP Accept. Remote Port: {port}. Initiating transfer...");
-
                                     var remoteEP = new IPEndPoint(IPAddress.Loopback, port);
                                     stopwatch.Start();
 
@@ -186,7 +222,8 @@ namespace VelocityShare.E2ETest
                                     {
                                         try
                                         {
-                                            activeSender = new VctpSender(srcFilePath, fid, expectedHashHex, remoteEP, vctpKey, vctpNonce, targetRateMbps: 2000.0);
+                                            activeSender = new VctpSender(srcMmf, FileSize, fid, expectedHashHex, remoteEP, vctpKey, vctpNonce, targetRateMbps: 100000.0, bypassCrypto: bypassCrypto);
+                                            activeSender.OnLog += (logMsg) => Console.WriteLine($"[Sender Log] {logMsg}");
                                             await activeSender.StartAsync();
                                         }
                                         catch (Exception ex)
@@ -206,7 +243,6 @@ namespace VelocityShare.E2ETest
                 }
             });
 
-            // 5. Send the offer from Peer A to Peer B via the VM
             var offerEnvelope = JsonSerializer.Serialize(new
             {
                 type = "folder_sync_payload",
@@ -224,54 +260,69 @@ namespace VelocityShare.E2ETest
                 })
             });
 
-            Console.WriteLine("[Peer A] Dispatching sync_vctp_offer to VM...");
             await wsA.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(offerEnvelope)), WebSocketMessageType.Text, true, cts.Token);
 
-            // Wait for receiver to signal completion (max 45 seconds)
-            await Task.WhenAny(tcs.Task, Task.Delay(45000));
+            // Wait for receiver to signal completion (max 60 seconds)
+            await Task.WhenAny(tcs.Task, Task.Delay(60000));
             stopwatch.Stop();
 
             cts.Cancel();
             try { await Task.WhenAll(peerATask, peerBTask); } catch { }
 
-            // 6. Print E2E Summary
-            bool verified = finalDestHash.Equals(expectedHashHex, StringComparison.OrdinalIgnoreCase);
-            Console.WriteLine("---------------------------------------------------------------------");
-            Console.WriteLine("                      E2E TEST RESULT SUMMARY                        ");
-            Console.WriteLine("---------------------------------------------------------------------");
-            Console.WriteLine($"Hash Match Verified:  {verified}");
-            Console.WriteLine($"Expected Hash:        {expectedHashHex}");
-            Console.WriteLine($"Received Hash:        {finalDestHash}");
-            
-            if (verified)
+            bool memCheckPassed = true;
+            if (finalDestHash.Equals(expectedHashHex, StringComparison.OrdinalIgnoreCase))
             {
-                double elapsedSec = stopwatch.Elapsed.TotalSeconds;
-                double speedMB = (FileSize / (1024.0 * 1024.0)) / elapsedSec;
-                Console.WriteLine($"Time Taken:           {elapsedSec:F3} seconds");
-                Console.WriteLine($"P2P Throughput:       {speedMB:F2} MB/s ({speedMB * 8.0:F2} Mbps)");
+                using var srcAccessor = srcMmf.CreateViewAccessor(0, FileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
+                using var destAccessor = destMmf.CreateViewAccessor(0, FileSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
+                unsafe
+                {
+                    byte* pSrc = null;
+                    byte* pDest = null;
+                    srcAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pSrc);
+                    destAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pDest);
+                    try
+                    {
+                        long* pSrcLong = (long*)pSrc;
+                        long* pDestLong = (long*)pDest;
+                        long longCount = FileSize / 8;
+                        for (long i = 0; i < longCount; i++)
+                        {
+                            if (pSrcLong[i] != pDestLong[i])
+                            {
+                                memCheckPassed = false;
+                                break;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        srcAccessor.SafeMemoryMappedViewHandle.ReleasePointer();
+                        destAccessor.SafeMemoryMappedViewHandle.ReleasePointer();
+                    }
+                }
             }
             else
             {
-                Console.WriteLine("ERROR: Verification failed! Hashes do not match or timeout occurred.");
+                memCheckPassed = false;
             }
-            Console.WriteLine("=====================================================================");
 
-            // Cleanup
+            bool verified = memCheckPassed;
+            double speedMB = 0;
+            if (verified)
+            {
+                double elapsedSec = stopwatch.Elapsed.TotalSeconds;
+                speedMB = (FileSize / (1024.0 * 1024.0)) / elapsedSec;
+                Console.WriteLine($"[Result] Verified = True. Speed: {speedMB:F2} MB/s in {elapsedSec:F3}s");
+            }
+            else
+            {
+                Console.WriteLine("[Result] ERROR: Verification failed or timeout!");
+            }
+
             activeReceiver?.Dispose();
             activeSender?.Dispose();
-            CleanupDirs(tempDir);
-        }
 
-        private static void CleanupDirs(string path)
-        {
-            try
-            {
-                if (Directory.Exists(path))
-                {
-                    Directory.Delete(path, true);
-                }
-            }
-            catch { }
+            return speedMB;
         }
     }
 }
