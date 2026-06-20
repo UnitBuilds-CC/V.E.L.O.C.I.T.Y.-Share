@@ -97,8 +97,8 @@ namespace VelocityShare.E2ETest
 
             byte[] vctpKey = new byte[32];
             byte[] vctpNonce = new byte[12];
-            Random.Shared.NextBytes(vctpKey);
-            Random.Shared.NextBytes(vctpNonce);
+            System.Security.Cryptography.RandomNumberGenerator.Fill(vctpKey);
+            System.Security.Cryptography.RandomNumberGenerator.Fill(vctpNonce);
             Guid fileId = Guid.NewGuid();
 
             using var wsA = new ClientWebSocket();

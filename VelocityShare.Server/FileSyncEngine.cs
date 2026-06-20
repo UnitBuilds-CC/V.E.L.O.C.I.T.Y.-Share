@@ -120,8 +120,8 @@ namespace VelocityShare.Server
                         var fileId = Guid.NewGuid();
                         byte[] key = new byte[32];
                         byte[] nonce = new byte[12];
-                        Random.Shared.NextBytes(key);
-                        Random.Shared.NextBytes(nonce);
+                        System.Security.Cryptography.RandomNumberGenerator.Fill(key);
+                        System.Security.Cryptography.RandomNumberGenerator.Fill(nonce);
 
                         ActiveSyncTransfers[fileId] = (key, nonce, fullPath, hashHex);
 
