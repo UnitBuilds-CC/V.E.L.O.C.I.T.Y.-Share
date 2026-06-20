@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VelocityShare.Server\VelocityShare.Server.csproj" />
+  </ItemGroup>
+
+  <Target Name="CopyNativeDll" AfterTargets="Build">
+    <Copy SourceFiles="..\VelocityShare.Server\velocity_share_ffi.dll" DestinationFolder="$(OutputPath)" ContinueOnError="true" />
+  </Target>
+
+</Project>

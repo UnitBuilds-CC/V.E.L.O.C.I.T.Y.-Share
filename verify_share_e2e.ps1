@@ -37,15 +37,11 @@ if ($res1 -and $res1.status -eq "PASS") {
     exit 1
 }
 
-# 2. Run VCTP File Transfer loopback simulation
-Write-Host "[Test 2] Running VCTP loopback file sync simulation (with force-kill & resume)..." -ForegroundColor Yellow
-$res2 = Invoke-ShareApi -Path "/api/share/test/vctp"
-if ($res2 -and $res2.status -eq "PASS") {
-    Write-Host "  -> [PASS] VCTP transfer completed successfully." -ForegroundColor Green
-    Write-Host "  -> Throughput: $($res2.throughput_mbs.ToString("F2")) MB/s ($(($res2.throughput_mbps / 1000.0).ToString("F2")) Gbps)" -ForegroundColor Green
-    Write-Host "  -> Verification log count: $($res2.logs.Count) lines." -ForegroundColor Green
-} else {
-    Write-Error "  -> [FAIL] VCTP self-test did not return PASS status."
+# 2. Run VCTP Client-to-Client True E2E Test
+Write-Host "[Test 2] Running VCTP True Client-to-Client E2E Test (signaling via VM)..." -ForegroundColor Yellow
+& powershell.exe -ExecutionPolicy Bypass -File .\run_share_e2e.ps1
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "  -> [FAIL] VCTP True E2E Test failed."
     exit 1
 }
 
