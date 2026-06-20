@@ -14,7 +14,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\V.E.L.O.C.I.T.Y.-NDA\src\Velocity.NDA\Velocity.NDA.csproj" />
+    <Reference Include="Velocity.NDA">
+      <HintPath>Velocity.NDA.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
   <Target Name="CopyRustDll" BeforeTargets="Build">
