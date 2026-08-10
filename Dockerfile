@@ -2,7 +2,7 @@
 # Compiles Rust FFI libraries and publishes ASP.NET Core server on Linux
 
 # Stage 1: Compile Rust FFI
-FROM rust:stable AS rust-builder
+FROM rust:latest AS rust-builder
 WORKDIR /app
 COPY velocity_share_ffi/ .
 RUN cargo build --release
