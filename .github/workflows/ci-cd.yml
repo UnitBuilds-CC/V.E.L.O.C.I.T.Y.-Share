@@ -27,14 +27,33 @@ jobs:
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
 
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ env.RUST_VERSION }}
+
+    - name: Cache Cargo dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          velocity_share_ffi/target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('velocity_share_ffi/Cargo.lock') }}
+
+    - name: Build Rust FFI library
+      run: cd velocity_share_ffi && cargo build --release
+
     - name: Restore dependencies
       run: dotnet restore
 
     - name: Build server
       run: dotnet build VelocityShare.Server/VelocityShare.Server.csproj --no-restore -c Release
 
-    - name: Run unit tests
-      run: dotnet test VelocityShare.Tests/VelocityShare.Tests.csproj --no-build -c Release --verbosity normal --logger "trx;LogFileName=test-results.trx"
+    - name: Run tests
+      run: dotnet test VelocityShare.Tests/VelocityShare.Tests.csproj -c Release --verbosity normal --logger "trx;LogFileName=test-results.trx"
 
     - name: Upload test results
       if: always()

@@ -12,7 +12,8 @@
     <InternalsVisibleTo Include="VelocityShare.Tests" />
   </ItemGroup>
 
-  <ItemGroup>
+  <!-- Windows: use committed pre-built DLL -->
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
     <None Update="velocity_share_ffi.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
@@ -29,8 +30,21 @@
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
   </ItemGroup>
 
-  <Target Name="CopyRustDll" BeforeTargets="Build">
-    <Copy SourceFiles="..\velocity_share_ffi\target\release\velocity_share_ffi.dll" DestinationFolder="." SkipUnchangedFiles="true" Condition="Exists('..\velocity_share_ffi\target\release\velocity_share_ffi.dll')" />
+  <!-- Windows: copy from local Rust build if available -->
+  <Target Name="CopyRustDll" BeforeTargets="Build"
+          Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <Copy SourceFiles="..\velocity_share_ffi\target\release\velocity_share_ffi.dll"
+          DestinationFolder="."
+          SkipUnchangedFiles="true"
+          Condition="Exists('..\velocity_share_ffi\target\release\velocity_share_ffi.dll')" />
+  </Target>
+
+  <!-- Linux: copy shared object from Cargo build to output -->
+  <Target Name="CopyRustSo" AfterTargets="Build"
+          Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <Copy SourceFiles="..\velocity_share_ffi\target\release\libvelocity_share_ffi.so"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true" />
   </Target>
 
 </Project>
