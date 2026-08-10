@@ -10,7 +10,7 @@ env:
   DOTNET_VERSION: '10.0.x'
   RUST_VERSION: 'stable'
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: velocity-share
 
 jobs:
   # ── Build & Test ──
