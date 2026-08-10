@@ -11,6 +11,8 @@ RUN cargo build --release
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS dotnet-builder
 WORKDIR /app
 COPY VelocityShare.Server/ VelocityShare.Server/
+# Place Rust FFI output where the CopyRustSo MSBuild target expects it
+COPY --from=rust-builder /app/target/release/libvelocity_share_ffi.so velocity_share_ffi/target/release/
 RUN dotnet publish VelocityShare.Server/VelocityShare.Server.csproj -c Release -o out
 
 # Stage 3: Container Runner
