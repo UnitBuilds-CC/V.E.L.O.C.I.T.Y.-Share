@@ -5,11 +5,12 @@ on:
     workflows: ["CI/CD Pipeline"]
     types: [completed]
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
-    # Only deploy if CI/CD pipeline succeeded
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Only deploy if CI/CD Pipeline succeeded (or manual dispatch)
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -26,7 +27,7 @@ jobs:
           username: azureuser
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "share.tar.gz"
-          target: "/home/azureuser/"
+          target: "/opt/velocity/VelocityShare/"
 
       - name: Extract and Build Container on VM
         uses: appleboy/ssh-action@v1.0.3
@@ -35,8 +36,40 @@ jobs:
           username: azureuser
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /home/azureuser
-            mkdir -p VelocityShare
-            tar -xzf share.tar.gz -C VelocityShare/
+            cd /opt/velocity/VelocityShare
+            tar -xzf share.tar.gz --strip-components=0
             rm share.tar.gz
-            sudo docker compose up -d --build velocity-share-server
+            # Write .env file for this service (env_file in docker-compose)
+            printf 'Credentials__AdminApiKey=%s\nCredentials__WebSocketToken=%s\nCors__AllowedOrigins__0=%s\n' "${{ secrets.SHARE_ADMIN_API_KEY }}" "${{ secrets.SHARE_WS_TOKEN }}" "https://share.${{ secrets.DOMAIN }}" > /opt/velocity/VelocityShare/.env
+            # Build and restart only the share service
+            cd /opt/velocity
+            sudo docker compose up -d --build share
+
+      - name: Post-Deploy Smoke Test
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 52.188.14.216
+          username: azureuser
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            sleep 10
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5002/health || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Deploy smoke test PASSED: Share is healthy"
+            else
+              echo "Deploy smoke test FAILED: Share returned HTTP $HTTP_CODE"
+              sudo docker logs --tail 50 velocity-share
+              exit 1
+            fi
+
+      - name: Rollback on Failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 52.188.14.216
+          username: azureuser
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "Deployment failed. Attempting rollback..."
+            cd /opt/velocity
+            sudo docker compose up -d share || echo "Rollback failed: cannot restart share"
