@@ -1,0 +1,45 @@
+services:
+  velocity-share:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: velocity-share:latest
+    container_name: velocity-share-server
+    ports:
+      - "5000:5000"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:5000
+      - Cors__AllowedOrigins__0=https://share.unitbuilds.com
+      # ── Credentials: MUST be set via .env or docker-compose override ──
+      - Credentials__AdminApiKey=${VELOCITY_API_KEY:-}
+      - Credentials__WebSocketToken=${VELOCITY_WS_TOKEN:-}
+    volumes:
+      - uploads:/app/wwwroot/uploads
+      - logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+volumes:
+  uploads:
+    driver: local
+  logs:
+    driver: local

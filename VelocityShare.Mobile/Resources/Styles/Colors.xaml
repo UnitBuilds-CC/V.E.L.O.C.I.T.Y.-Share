@@ -3,21 +3,42 @@
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml">
 
-    <!-- Note: For Android please see also Platforms\Android\Resources\values\colors.xml -->
+    <!-- ═══ V.E.L.O.C.I.T.Y. SHARE — Brand Colors ═══ -->
+    <!-- Matched to web frontend CSS variables (index.css :root) -->
 
-    <Color x:Key="Primary">#512BD4</Color>
-    <Color x:Key="PrimaryDark">#ac99ea</Color>
-    <Color x:Key="PrimaryDarkText">#242424</Color>
-    <Color x:Key="Secondary">#DFD8F7</Color>
-    <Color x:Key="SecondaryDarkText">#9880e5</Color>
-    <Color x:Key="Tertiary">#2B0B98</Color>
+    <!-- Backgrounds -->
+    <Color x:Key="BgBase">#0a0c12</Color>
+    <Color x:Key="BgSidebar">#0d1018</Color>
+    <Color x:Key="BgCard">#0e121c</Color>
+    <Color x:Key="BgInput">#1a1e2e</Color>
+    <Color x:Key="BgHover">#1e2235</Color>
 
+    <!-- Brand accent colors -->
+    <Color x:Key="Green">#00ff66</Color>
+    <Color x:Key="Cyan">#00e5ff</Color>
+    <Color x:Key="Amber">#f59e0b</Color>
+    <Color x:Key="Red">#ef4444</Color>
+    <Color x:Key="Purple">#a855f7</Color>
+
+    <!-- Text hierarchy -->
+    <Color x:Key="TextPrimary">#f1f5f9</Color>
+    <Color x:Key="TextSecondary">#94a3b8</Color>
+    <Color x:Key="TextMuted">#64748b</Color>
+
+    <!-- Borders -->
+    <Color x:Key="Border">#1a1e2e</Color>
+    <Color x:Key="BorderHover">#2a3050</Color>
+
+    <!-- Semantic aliases -->
+    <Color x:Key="Primary">#00ff66</Color>
+    <Color x:Key="PrimaryDark">#00cc52</Color>
+    <Color x:Key="Secondary">#00e5ff</Color>
+    <Color x:Key="Tertiary">#a855f7</Color>
     <Color x:Key="White">White</Color>
     <Color x:Key="Black">Black</Color>
-    <Color x:Key="Magenta">#D600AA</Color>
-    <Color x:Key="MidnightBlue">#190649</Color>
-    <Color x:Key="OffBlack">#1f1f1f</Color>
+    <Color x:Key="OffBlack">#0a0c12</Color>
 
+    <!-- Grays -->
     <Color x:Key="Gray100">#E1E1E1</Color>
     <Color x:Key="Gray200">#C8C8C8</Color>
     <Color x:Key="Gray300">#ACACAC</Color>
@@ -27,11 +48,15 @@
     <Color x:Key="Gray900">#212121</Color>
     <Color x:Key="Gray950">#141414</Color>
 
+    <!-- Brushes -->
     <SolidColorBrush x:Key="PrimaryBrush" Color="{StaticResource Primary}"/>
     <SolidColorBrush x:Key="SecondaryBrush" Color="{StaticResource Secondary}"/>
     <SolidColorBrush x:Key="TertiaryBrush" Color="{StaticResource Tertiary}"/>
     <SolidColorBrush x:Key="WhiteBrush" Color="{StaticResource White}"/>
     <SolidColorBrush x:Key="BlackBrush" Color="{StaticResource Black}"/>
+    <SolidColorBrush x:Key="BgBaseBrush" Color="{StaticResource BgBase}"/>
+    <SolidColorBrush x:Key="BgCardBrush" Color="{StaticResource BgCard}"/>
+    <SolidColorBrush x:Key="BgInputBrush" Color="{StaticResource BgInput}"/>
 
     <SolidColorBrush x:Key="Gray100Brush" Color="{StaticResource Gray100}"/>
     <SolidColorBrush x:Key="Gray200Brush" Color="{StaticResource Gray200}"/>

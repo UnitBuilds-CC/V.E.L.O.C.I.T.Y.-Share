@@ -15,7 +15,8 @@ namespace VelocityShare.E2ETest
 {
     class Program
     {
-        private const string ServerUrl = "ws://127.0.0.1:5213/ws/share";
+        private static string ServerUrl = Environment.GetEnvironmentVariable("VELOCITY_SHARE_WS_URL") ?? "ws://127.0.0.1:5000/ws/share";
+        private static string ApiKey = Environment.GetEnvironmentVariable("VELOCITY_API_KEY") ?? "";
         private const string PeerA = "PeerA";
         private const string PeerB = "PeerB";
         private const string TestFileName = "e2e_test_file.bin";
@@ -23,9 +24,11 @@ namespace VelocityShare.E2ETest
 
         static async Task Main(string[] args)
         {
+            if (args.Length > 0) ServerUrl = args[0];
             Console.WriteLine("=====================================================================");
             Console.WriteLine("          V.E.L.O.C.I.T.Y. Share Client-to-Client E2E Test");
             Console.WriteLine("=====================================================================");
+            Console.WriteLine($"[Config] Server URL: {ServerUrl}");
 
             // Generate test data and load it into source MMF
             byte[] srcBytes = new byte[FileSize];
@@ -104,18 +107,27 @@ namespace VelocityShare.E2ETest
 
             using var wsA = new ClientWebSocket();
             wsA.Options.SetRequestHeader("Host", "share.unitbuilds.com");
-            wsA.Options.RemoteCertificateValidationCallback = (sender, cert, chain, sslPolicyErrors) => true;
+            if (!string.IsNullOrEmpty(ApiKey)) wsA.Options.SetRequestHeader("X-API-Key", ApiKey);
 
             using var wsB = new ClientWebSocket();
             wsB.Options.SetRequestHeader("Host", "share.unitbuilds.com");
-            wsB.Options.RemoteCertificateValidationCallback = (sender, cert, chain, sslPolicyErrors) => true;
+            if (!string.IsNullOrEmpty(ApiKey)) wsB.Options.SetRequestHeader("X-API-Key", ApiKey);
 
             var cts = new CancellationTokenSource();
 
+            // Build WebSocket URLs with auth token if available
+            string wsUrlA = $"{ServerUrl}?peerId={PeerA}";
+            string wsUrlB = $"{ServerUrl}?peerId={PeerB}";
+            if (!string.IsNullOrEmpty(ApiKey))
+            {
+                wsUrlA += $"&apiKey={Uri.EscapeDataString(ApiKey)}";
+                wsUrlB += $"&apiKey={Uri.EscapeDataString(ApiKey)}";
+            }
+
             try
             {
-                await wsA.ConnectAsync(new Uri($"{ServerUrl}?peerId={PeerA}"), cts.Token);
-                await wsB.ConnectAsync(new Uri($"{ServerUrl}?peerId={PeerB}"), cts.Token);
+                await wsA.ConnectAsync(new Uri(wsUrlA), cts.Token);
+                await wsB.ConnectAsync(new Uri(wsUrlB), cts.Token);
             }
             catch (Exception ex)
             {

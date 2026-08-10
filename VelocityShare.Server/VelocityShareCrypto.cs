@@ -15,6 +15,15 @@ namespace VelocityShare.Server
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int decrypt_block_chacha(byte* keyPtr, byte* noncePtr, byte* dataPtr, nuint dataLen, byte* tagPtr);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int bulk_hash_chunks(byte* chunksPtr, nuint totalLen, uint chunkCount, byte* hashesOutPtr);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int verify_chunk_integrity(byte* dataPtr, nuint dataLen, byte* expectedHashPtr);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int pbkdf2_derive(byte* passwordPtr, nuint passwordLen, byte* saltPtr, nuint saltLen, uint iterations, byte* derivedKeyPtr, nuint outLen);
         
         public static byte[] HashChunk(ReadOnlySpan<byte> chunk)
         {
@@ -112,6 +121,57 @@ namespace VelocityShare.Server
             {
                 return decrypt_block_chacha(pKey, pNonce, pPlain, (nuint)ciphertext.Length, pTag);
             }
+        }
+
+        // ── Bulk hash: hash multiple chunks in a single FFI call ──
+        public static byte[][] BulkHashChunks(ReadOnlySpan<byte> chunkBuffer, uint chunkCount)
+        {
+            var hashes = new byte[chunkCount][];
+            var hashBuffer = new byte[chunkCount * 32];
+
+            fixed (byte* pChunks = chunkBuffer)
+            fixed (byte* pHashes = hashBuffer)
+            {
+                int rc = bulk_hash_chunks(pChunks, (nuint)chunkBuffer.Length, chunkCount, pHashes);
+                if (rc != 0) throw new InvalidOperationException($"Bulk hash FFI failed with code {rc}");
+            }
+
+            for (int i = 0; i < chunkCount; i++)
+            {
+                hashes[i] = new byte[32];
+                System.Buffer.BlockCopy(hashBuffer, i * 32, hashes[i], 0, 32);
+            }
+            return hashes;
+        }
+
+        // ── Verify chunk integrity: hash + compare in one FFI call (constant-time) ──
+        public static bool VerifyChunkIntegrity(ReadOnlySpan<byte> chunk, ReadOnlySpan<byte> expectedHash)
+        {
+            if (expectedHash.Length != 32) throw new ArgumentException("Expected hash must be 32 bytes");
+
+            fixed (byte* pData = chunk)
+            fixed (byte* pHash = expectedHash)
+            {
+                int rc = verify_chunk_integrity(pData, (nuint)chunk.Length, pHash);
+                if (rc < 0) throw new InvalidOperationException($"Integrity check FFI failed with code {rc}");
+                return rc == 0;
+            }
+        }
+
+        // ── PBKDF2 key derivation via Rust (zero-allocation in the crypto path) ──
+        public static byte[] Pbkdf2Derive(ReadOnlySpan<byte> password, ReadOnlySpan<byte> salt, uint iterations, int outputLength = 32)
+        {
+            byte[] derived = new byte[outputLength];
+
+            fixed (byte* pPwd = password)
+            fixed (byte* pSalt = salt)
+            fixed (byte* pOut = derived)
+            {
+                int rc = pbkdf2_derive(pPwd, (nuint)password.Length, pSalt, (nuint)salt.Length, iterations, pOut, (nuint)outputLength);
+                if (rc != 0) throw new InvalidOperationException($"PBKDF2 FFI failed with code {rc}");
+            }
+
+            return derived;
         }
     }
 }

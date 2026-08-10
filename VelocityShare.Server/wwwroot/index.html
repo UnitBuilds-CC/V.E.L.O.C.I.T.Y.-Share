@@ -3,208 +3,361 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>V.E.L.O.C.I.T.Y. Share - Command Center</title>
+    <title>V.E.L.O.C.I.T.Y. Share</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='none' stroke='%2300ff66' stroke-width='8'/><circle cx='50' cy='50' r='12' fill='%2300e5ff'/></svg>">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Space+Grotesk:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="index.css">
 </head>
 <body>
-    <!-- Background grid decoration -->
-    <div class="background-grid"></div>
-    <div class="background-radial"></div>
+    <!-- Skip navigation for keyboard users -->
+    <a href="#panel-home" class="skip-nav">Skip to main content</a>
 
-    <div class="app-container">
-        <!-- TOP HEADER BAR -->
-        <header class="main-header glass">
-            <div class="header-logo">
-                <span class="logo-accent">V.E.L.O.C.I.T.Y.</span>
-                <span class="logo-sub">SHARE</span>
+    <div class="bg-gradient"></div>
+
+    <!-- Document-level drag overlay (visual only, hidden from screen readers) -->
+    <div class="drag-overlay" id="drag-overlay" aria-hidden="true">
+        <div class="drag-overlay-content">
+            <svg viewBox="0 0 48 48" width="56" height="56" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="6" y="6" width="36" height="36" rx="8" stroke-dasharray="4 3" opacity="0.5"/><path d="M24 16v16M16 24h16" stroke-width="2" stroke-linecap="round"/></svg>
+            <h2>Drop files to send</h2>
+            <p>Release to start transferring</p>
+        </div>
+    </div>
+
+    <div class="app">
+        <!-- ── SIDEBAR ── -->
+        <aside class="sidebar">
+            <div class="sidebar-logo">
+                <svg viewBox="0 0 32 32" width="28" height="28" fill="none">
+                    <circle cx="16" cy="16" r="13" stroke="url(#bg)" stroke-width="2.5"/>
+                    <circle cx="16" cy="16" r="4" fill="url(#bg)"/>
+                    <defs><linearGradient id="bg" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#00ff66"/><stop offset="1" stop-color="#00e5ff"/></linearGradient></defs>
+                </svg>
             </div>
-            
-            <div class="header-status">
-                <div class="status-indicator">
-                    <span class="status-dot pulse" id="connection-dot"></span>
-                    <span id="connection-status">Connecting Handshake...</span>
+
+            <nav class="sidebar-nav" role="tablist" aria-label="Main navigation">
+                <button class="sidebar-tab active" data-tab="home" role="tab" aria-selected="true" aria-controls="panel-home" title="Home">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                    <span>Home</span>
+                </button>
+                <button class="sidebar-tab" data-tab="transfers" role="tab" aria-selected="false" aria-controls="panel-transfers" title="Transfers">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                    <span>Transfers</span>
+                </button>
+                <button class="sidebar-tab" data-tab="peers" role="tab" aria-selected="false" aria-controls="panel-peers" title="Peers">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" aria-hidden="true"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+                    <span>Peers</span>
+                    <span class="sidebar-badge" id="peer-count">0</span>
+                </button>
+                <button class="sidebar-tab" data-tab="settings" role="tab" aria-selected="false" aria-controls="panel-settings" title="Settings">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="1.8" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                    <span>Settings</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-bottom">
+                <div class="sidebar-peer-id" id="peer-badge-btn" role="button" tabindex="0" aria-label="Copy my peer ID" title="Click to copy">
+                    <span class="spi-label">YOUR ID</span>
+                    <span class="spi-value monospace" id="my-peer-id">---</span>
+                    <svg class="spi-copy" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
                 </div>
-                <div class="peer-badge">
-                    My ID: <span id="my-peer-id" class="monospace">---</span>
+                <div class="auth-badge hidden" id="auth-badge" title="Authenticated">
+                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="#00ff66" stroke-width="2" fill="none"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
                 </div>
             </div>
-        </header>
+        </aside>
 
-        <!-- MAIN LAYOUT -->
-        <main class="dashboard-grid">
-            <!-- LEFT COLUMN: CONTROLS & TRANSFERS -->
-            <section class="left-column">
-                <!-- DROPSITE CONFIGURATION -->
-                <div class="card config-card glass">
-                    <div class="card-header">
-                        <h2>Dropsite Configuration</h2>
-                        <span class="badge" id="dropsite-badge">Local NAS</span>
+        <!-- ── MAIN ── -->
+        <main class="main">
+            <!-- Top Bar -->
+            <header class="topbar">
+                <div class="topbar-left">
+                    <div class="connection-status" id="connection-pill">
+                        <span class="status-dot pulse" id="connection-dot" role="status" aria-live="polite"></span>
+                        <span id="connection-status">Connecting...</span>
                     </div>
-                    <div class="config-fields">
-                        <div class="input-group">
-                            <label for="dropsite-type">Type</label>
-                            <select id="dropsite-type">
-                                <option value="local_nas">Local NAS / Directory</option>
-                                <option value="google_drive_mock">Google Drive (Secure Mock)</option>
-                                <option value="onedrive_mock">OneDrive (Secure Mock)</option>
-                            </select>
+                </div>
+                <div class="topbar-right">
+                    <div class="telemetry-bar">
+                        <div class="tb-item">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                            <span id="val-upload">0.0</span><span class="tb-unit">MB/s</span>
                         </div>
-                        <div class="input-group">
-                            <label for="dropsite-path">Dumpsite Path / Endpoint</label>
-                            <div class="input-row">
-                                <input type="text" id="dropsite-path" placeholder="e.g. C:\Share\NAS" class="monospace">
-                                <button id="btn-save-config" class="btn btn-primary">SAVE</button>
-                            </div>
+                        <div class="tb-item">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+                            <span id="val-download">0.0</span><span class="tb-unit">MB/s</span>
+                        </div>
+                        <div class="tb-item">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            <span id="val-latency">0</span><span class="tb-unit">ms</span>
                         </div>
                     </div>
                 </div>
+            </header>
 
-                <!-- LIVE DIRECTORY SYNCHRONIZER -->
-                <div class="card sync-card glass">
-                    <div class="card-header">
-                        <h2>Folder Synchronizer</h2>
-                        <span class="badge" id="sync-status-badge">Inactive</span>
-                    </div>
-                    <div class="config-fields">
-                        <div class="input-group">
-                            <label for="sync-path">Local Directory Path</label>
-                            <input type="text" id="sync-path" placeholder="e.g. C:\VelocitySync" class="monospace">
-                        </div>
-                        <div class="input-group">
-                            <label for="sync-peer-id">Target Sync Peer ID</label>
-                            <div class="input-row">
-                                <input type="text" id="sync-peer-id" placeholder="e.g. peer_ab12cd" class="monospace">
-                                <button id="btn-toggle-sync" class="btn btn-primary">START SYNC</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+            <!-- Auth Bar -->
+            <div class="auth-bar hidden" id="auth-bar">
+                <svg class="auth-bar-icon" viewBox="0 0 24 24" width="18" height="18" stroke="#f59e0b" stroke-width="2" fill="none"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+                <input type="password" id="api-key-input" class="monospace auth-key-input" placeholder="Enter API key..." autocomplete="off">
+                <button id="btn-auth-submit" class="btn btn-primary btn-sm">Authenticate</button>
+                <span id="auth-status-msg" class="auth-status-msg"></span>
+            </div>
 
-                <!-- FILE DROPZONE & ACTIVE UPLOADER -->
-                <div class="card dropzone-card glass">
-                    <div class="card-header">
-                        <h2>File Dispatcher</h2>
-                    </div>
-                    
-                    <div class="file-dropzone" id="dropzone">
-                        <div class="dropzone-icon">
-                            <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none">
-                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
-                            </svg>
+            <!-- Content -->
+            <div class="content">
+                <!-- HOME TAB -->
+                <div class="tab-panel active" id="panel-home" role="tabpanel" aria-labelledby="panel-home-label">
+                    <!-- Hero: Your ID + Drop Zone -->
+                    <div class="home-hero">
+                        <div class="hero-id-card">
+                            <div class="hero-id-label">Your Connection ID</div>
+                            <div class="hero-id-value monospace" id="hero-peer-id">---</div>
+                            <div class="hero-id-hint">Share this with peers so they can send you files</div>
+                            <button class="btn btn-outline btn-sm" id="hero-copy-btn">
+                                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                                Copy ID
+                            </button>
                         </div>
-                        <div class="dropzone-text">
-                            <h3>Drag & Drop Files Here</h3>
-                            <p>or click to browse local directory</p>
-                        </div>
-                        <input type="file" id="file-input" class="hidden-input" multiple>
-                    </div>
-
-                    <div id="active-transfers-container" class="hidden">
-                        <div class="transfer-list-header">
-                            <h3>Active Streams</h3>
-                        </div>
-                        <div class="transfer-list" id="transfer-list">
-                            <!-- Transfer items populated dynamically -->
-                        </div>
-                    </div>
-                </div>
-
-                <!-- PEER LIST ROSTER -->
-                <div class="card peer-card glass">
-                    <div class="card-header">
-                        <h2>Available Peers</h2>
-                        <span class="badge badge-online" id="peer-count">0 Online</span>
-                    </div>
-                    <div class="peer-list" id="peer-list">
-                        <div class="empty-peers">No other peers online. Open another tab or browser to test P2P file sharing!</div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- RIGHT COLUMN: TELEMETRY & LIVE CANVAS -->
-            <section class="right-column">
-                <!-- LIVE CONNECTION VISUALIZER -->
-                <div class="card visualizer-card glass">
-                    <div class="card-header">
-                        <h2>P2P Stream Matrix</h2>
-                        <span class="matrix-legend">Real-Time Canvas Map</span>
-                    </div>
-                    <div class="canvas-container">
-                        <canvas id="matrix-canvas"></canvas>
-                        <div class="node-label sender-label">SENDER (Local)</div>
-                        <div class="node-label server-label">GATEWAY (Server)</div>
-                        <div class="node-label receiver-label">PEER (Remote)</div>
-                    </div>
-                </div>
-
-                <!-- TELEMETRY SPEED DIALS -->
-                <div class="card telemetry-card glass">
-                    <div class="card-header">
-                        <h2>Transmission Telemetry</h2>
-                    </div>
-                    <div class="telemetry-grid">
-                        <div class="dial-container">
-                            <div class="speed-dial" id="dial-upload">
-                                <svg class="dial-svg" viewBox="0 0 100 100">
-                                    <circle class="dial-bg" cx="50" cy="50" r="40"></circle>
-                                    <circle class="dial-progress" id="progress-upload" cx="50" cy="50" r="40"></circle>
+                        <div class="hero-dropzone" id="dropzone" role="button" tabindex="0" aria-label="Drop files here or click to browse">
+                            <div class="dz-icon">
+                                <svg viewBox="0 0 48 48" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+                                    <rect x="6" y="6" width="36" height="36" rx="8" stroke-dasharray="4 3" opacity="0.4"/>
+                                    <path d="M24 16v16M16 24h16" stroke-width="2" stroke-linecap="round"/>
                                 </svg>
-                                <div class="dial-text">
-                                    <span class="dial-val" id="val-upload">0.0</span>
-                                    <span class="dial-unit">MB/s</span>
+                            </div>
+                            <div class="dz-text">
+                                <h3>Send files to peers</h3>
+                                <p>Drag & drop or click to browse</p>
+                            </div>
+                            <span class="dz-hint">Max 50 MB per file &middot; P2P encrypted transfer</span>
+                            <input type="file" id="file-input" class="hidden-input" multiple>
+                        </div>
+                    </div>
+
+                    <!-- Active Transfers Preview -->
+                    <div class="section" id="active-transfers-container" style="display:none">
+                        <div class="section-header">
+                            <h2>Active Transfers</h2>
+                        </div>
+                        <div class="transfer-list" id="transfer-list"></div>
+                    </div>
+
+                    <!-- Quick Peers -->
+                    <div class="section">
+                        <div class="section-header">
+                            <h2>Online Peers</h2>
+                            <span class="badge badge-green" id="peer-count-inline">0 online</span>
+                        </div>
+                        <div class="peer-list" id="peer-list">
+                            <div class="empty-state">
+                                <svg viewBox="0 0 24 24" width="40" height="40" stroke="currentColor" stroke-width="1" fill="none" opacity="0.25"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+                                <p>No peers online</p>
+                                <span>Open another tab or browser to start sharing</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TRANSFERS TAB -->
+                <div class="tab-panel" id="panel-transfers" role="tabpanel" aria-labelledby="panel-transfers-label">
+                    <div class="transfers-view">
+                        <div class="section">
+                            <div class="section-header">
+                                <h2>Active Transfers</h2>
+                            </div>
+                            <div class="transfer-list" id="transfer-list-full">
+                                <div class="empty-state">
+                                    <svg viewBox="0 0 24 24" width="40" height="40" stroke="currentColor" stroke-width="1" fill="none" opacity="0.25"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                                    <p>No active transfers</p>
+                                    <span>Drop files on the home tab to start</span>
                                 </div>
                             </div>
-                            <span class="dial-label">Upload Rate</span>
                         </div>
 
-                        <div class="dial-container">
-                            <div class="speed-dial" id="dial-download">
-                                <svg class="dial-svg" viewBox="0 0 100 100">
-                                    <circle class="dial-bg" cx="50" cy="50" r="40"></circle>
-                                    <circle class="dial-progress" id="progress-download" cx="50" cy="50" r="40"></circle>
-                                </svg>
-                                <div class="dial-text">
-                                    <span class="dial-val" id="val-download">0.0</span>
-                                    <span class="dial-unit">MB/s</span>
-                                </div>
+                        <div class="section" id="history-section" style="display:none">
+                            <div class="section-header">
+                                <h2>Transfer History</h2>
+                                <button class="btn btn-outline btn-sm" id="btn-clear-history">Clear</button>
                             </div>
-                            <span class="dial-label">Download Rate</span>
-                        </div>
-
-                        <div class="dial-container">
-                            <div class="speed-dial" id="dial-saturation">
-                                <svg class="dial-svg" viewBox="0 0 100 100">
-                                    <circle class="dial-bg" cx="50" cy="50" r="40"></circle>
-                                    <circle class="dial-progress" id="progress-saturation" cx="50" cy="50" r="40"></circle>
-                                </svg>
-                                <div class="dial-text">
-                                    <span class="dial-val" id="val-saturation">0</span>
-                                    <span class="dial-unit">%</span>
-                                </div>
-                            </div>
-                            <span class="dial-label">Link Saturation</span>
-                        </div>
-
-                        <div class="dial-container">
-                            <div class="speed-dial" id="dial-latency">
-                                <svg class="dial-svg" viewBox="0 0 100 100">
-                                    <circle class="dial-bg" cx="50" cy="50" r="40"></circle>
-                                    <circle class="dial-progress" id="progress-latency" cx="50" cy="50" r="40"></circle>
-                                </svg>
-                                <div class="dial-text">
-                                    <span class="dial-val" id="val-latency">0</span>
-                                    <span class="dial-unit">ms</span>
-                                </div>
-                            </div>
-                            <span class="dial-label">RTT Latency</span>
+                            <div class="history-list" id="history-list"></div>
                         </div>
                     </div>
                 </div>
-            </section>
+
+                <!-- PEERS TAB -->
+                <div class="tab-panel" id="panel-peers" role="tabpanel" aria-labelledby="panel-peers-label">
+                    <div class="section">
+                        <div class="section-header">
+                            <h2>Discovered Peers</h2>
+                            <span class="badge badge-green" id="peer-count-full">0 online</span>
+                        </div>
+                        <div class="peer-list peer-list-full" id="peer-list-full">
+                            <div class="empty-state">
+                                <svg viewBox="0 0 24 24" width="40" height="40" stroke="currentColor" stroke-width="1" fill="none" opacity="0.25"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+                                <p>No peers online</p>
+                                <span>Peers on the same server will appear here</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SETTINGS TAB -->
+                <div class="tab-panel" id="panel-settings" role="tabpanel" aria-labelledby="panel-settings-label">
+                    <div class="settings-grid">
+                        <!-- Storage -->
+                        <div class="card">
+                            <div class="card-header">
+                                <div class="card-icon icon-storage">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                                </div>
+                                <h2>Storage</h2>
+                                <span class="badge" id="dropsite-badge">Local NAS</span>
+                            </div>
+                            <div class="card-body">
+                                <div class="form-group">
+                                    <label for="dropsite-type">Storage Type</label>
+                                    <select id="dropsite-type">
+                                        <option value="local_nas">Local NAS / Directory</option>
+                                        <option value="google_drive_mock">Google Drive (Mock)</option>
+                                        <option value="onedrive_mock">OneDrive (Mock)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="dropsite-path">Path / Endpoint</label>
+                                    <div class="input-row">
+                                        <input type="text" id="dropsite-path" placeholder="C:\Share\NAS" class="monospace">
+                                        <button id="btn-save-config" class="btn btn-primary btn-sm">Save</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Folder Sync -->
+                        <div class="card">
+                            <div class="card-header">
+                                <div class="card-icon icon-sync">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+                                </div>
+                                <h2>Folder Sync</h2>
+                                <span class="badge" id="sync-status-badge">Inactive</span>
+                            </div>
+                            <div class="card-body">
+                                <div class="form-group">
+                                    <label for="sync-path">Local Directory</label>
+                                    <input type="text" id="sync-path" placeholder="C:\VelocitySync" class="monospace">
+                                </div>
+                                <div class="form-group">
+                                    <label for="sync-peer-id">Target Peer ID</label>
+                                    <div class="input-row">
+                                        <input type="text" id="sync-peer-id" placeholder="peer_ab12cd" class="monospace">
+                                        <button id="btn-toggle-sync" class="btn btn-primary btn-sm">Start</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Network Visualizer -->
+                        <div class="card card-wide">
+                            <div class="card-header">
+                                <div class="card-icon icon-network">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+                                </div>
+                                <h2>Network Matrix</h2>
+                            </div>
+                            <div class="card-body">
+                                <div class="canvas-container">
+                                    <canvas id="matrix-canvas" role="img" aria-label="Network visualization showing data flow between local node, gateway, and peer"></canvas>
+                                    <div class="node-label sender-label">LOCAL</div>
+                                    <div class="node-label server-label">GATEWAY</div>
+                                    <div class="node-label receiver-label">PEER</div>
+                                </div>
+                                <div class="telemetry-dials">
+                                    <div class="dial-container">
+                                        <div class="speed-dial" id="dial-upload">
+                                            <svg class="dial-svg" viewBox="0 0 100 100"><circle class="dial-bg" cx="50" cy="50" r="40"/><circle class="dial-progress" id="progress-upload" cx="50" cy="50" r="40"/></svg>
+                                            <div class="dial-text"><span class="dial-val" id="val-upload-dial">0.0</span><span class="dial-unit">MB/s</span></div>
+                                        </div>
+                                        <span class="dial-label">Upload</span>
+                                    </div>
+                                    <div class="dial-container">
+                                        <div class="speed-dial" id="dial-download">
+                                            <svg class="dial-svg" viewBox="0 0 100 100"><circle class="dial-bg" cx="50" cy="50" r="40"/><circle class="dial-progress" id="progress-download" cx="50" cy="50" r="40"/></svg>
+                                            <div class="dial-text"><span class="dial-val" id="val-download-dial">0.0</span><span class="dial-unit">MB/s</span></div>
+                                        </div>
+                                        <span class="dial-label">Download</span>
+                                    </div>
+                                    <div class="dial-container">
+                                        <div class="speed-dial" id="dial-saturation">
+                                            <svg class="dial-svg" viewBox="0 0 100 100"><circle class="dial-bg" cx="50" cy="50" r="40"/><circle class="dial-progress" id="progress-saturation" cx="50" cy="50" r="40"/></svg>
+                                            <div class="dial-text"><span class="dial-val" id="val-saturation">0</span><span class="dial-unit">%</span></div>
+                                        </div>
+                                        <span class="dial-label">Saturation</span>
+                                    </div>
+                                    <div class="dial-container">
+                                        <div class="speed-dial" id="dial-latency">
+                                            <svg class="dial-svg" viewBox="0 0 100 100"><circle class="dial-bg" cx="50" cy="50" r="40"/><circle class="dial-progress" id="progress-latency" cx="50" cy="50" r="40"/></svg>
+                                            <div class="dial-text"><span class="dial-val" id="val-latency-dial">0</span><span class="dial-unit">ms</span></div>
+                                        </div>
+                                        <span class="dial-label">Latency</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </main>
     </div>
+
+    <!-- Share Link Modal -->
+    <div class="modal-overlay hidden" id="share-modal" aria-hidden="true">
+        <div class="modal-card" role="dialog" aria-labelledby="share-modal-title">
+            <div class="modal-header">
+                <h2 id="share-modal-title">Create Share Link</h2>
+                <button class="modal-close" id="share-modal-close" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>File</label>
+                    <div class="monospace share-modal-filename" id="share-modal-filename">-</div>
+                </div>
+                <div class="form-group">
+                    <label for="share-expiry">Expiry</label>
+                    <select id="share-expiry">
+                        <option value="1">1 hour</option>
+                        <option value="6">6 hours</option>
+                        <option value="24" selected>24 hours</option>
+                        <option value="72">3 days</option>
+                        <option value="168">7 days</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="share-password">Password (optional)</label>
+                    <input type="password" id="share-password" placeholder="Leave empty for no password" class="monospace">
+                </div>
+                <div class="form-group">
+                    <label for="share-max-downloads">Max Downloads</label>
+                    <input type="number" id="share-max-downloads" value="100" min="1" max="10000" class="monospace">
+                </div>
+                <div class="form-group hidden" id="share-result">
+                    <label>Share URL</label>
+                    <div class="share-url-row">
+                        <input type="text" id="share-url-output" readonly class="monospace">
+                        <button class="btn btn-primary btn-sm" id="share-copy-btn">Copy</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline btn-sm" id="share-cancel-btn">Cancel</button>
+                <button class="btn btn-primary btn-sm" id="share-create-btn">Create Link</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast notifications -->
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+    <script src="app.js"></script>
 </body>
 </html>

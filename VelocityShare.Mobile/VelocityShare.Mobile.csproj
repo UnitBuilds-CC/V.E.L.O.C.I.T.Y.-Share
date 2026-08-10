@@ -29,7 +29,7 @@
 		<MauiXamlInflator>SourceGen</MauiXamlInflator>
 
 		<!-- Display name -->
-		<ApplicationTitle>VelocityShare.Mobile</ApplicationTitle>
+		<ApplicationTitle>V.E.L.O.C.I.T.Y. Share</ApplicationTitle>
 
 		<!-- App Identifier -->
 		<ApplicationId>com.companyname.velocityshare.mobile</ApplicationId>
@@ -50,10 +50,10 @@
 
 	<ItemGroup>
 		<!-- App Icon -->
-		<MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#512BD4" />
+		<MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#0a0c12" />
 
 		<!-- Splash Screen -->
-		<MauiSplashScreen Include="Resources\Splash\splash.svg" Color="#512BD4" BaseSize="128,128" />
+		<MauiSplashScreen Include="Resources\Splash\splash.svg" Color="#0a0c12" BaseSize="128,128" />
 
 		<!-- Images -->
 		<MauiImage Include="Resources\Images\*" />
@@ -68,7 +68,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
-		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0-preview.*" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -76,6 +76,8 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\..\V.E.L.O.C.I.T.Y.-NDA\src\Velocity.NDA\Velocity.NDA.csproj" />
+		<Reference Include="Velocity.NDA">
+			<HintPath>..\VelocityShare.Server\Velocity.NDA.dll</HintPath>
+		</Reference>
 	</ItemGroup>
 </Project>

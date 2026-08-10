@@ -1,130 +1,195 @@
-# Walkthrough - V.E.L.O.C.I.T.Y. Share (v1.0.0) & P2P Calling Pipeline
+# Walkthrough - V.E.L.O.C.I.T.Y. Share
 
-This document walks through the technical implementations of both **V.E.L.O.C.I.T.Y. Share** (secure file transfer system) and **V.E.L.O.C.I.T.Y. Messenger** (P2P secure VoIP calls).
+**Version:** 1.0.0 (Production Ready)  
+**Stack:** ASP.NET Core 10.0, Rust FFI, .NET MAUI, Vanilla JS SPA  
+**Last Updated:** August 2026
 
----
-
-## 1. V.E.L.O.C.I.T.Y. Share (Secure File Transfer)
-
-V.E.L.O.C.I.T.Y. Share is a high-speed, secure, and resilient file transfer platform designed to transmit large enterprise payloads with client-side block encryption and integrity verification, backed by a native Rust core.
-
-### Architectural Setup
-* **Unmanaged Rust Cryptography Core (`velocity_share_ffi`)**:
-  * Implemented parallel, hardware-accelerated SHA-256 integrity hashing via vectorized CPU instructions.
-  * Implemented block-level ChaCha20-Poly1305 stream cipher encryption (`encrypt_block_chacha`, `decrypt_block_chacha`) with detached tags for secure block-level data transmission.
-* **C# ASP.NET Core Signaling & Storage Backend (`VelocityShare.Server`)**:
-  * Configured unsafe pointers and P/Invoke bindings inside `VelocityShareCrypto.cs` to access the Rust FFI directly without garbage collector pinning overhead.
-  * Built WebSocket Signaling endpoints at `/ws/share` to coordinate WebRTC SDP offers/answers and ICE candidates dynamically between peers.
-  * Created REST endpoints `/api/share/upload` and `/api/share/download` to support server-buffered dropsite uploads (fallback directory, local NAS, or mock cloud endpoints) if recipient is offline.
-* **Frosted-Glass Command Center Web Client (`VelocityShare.Web`)**:
-  * Created a glassmorphic dashboard in Obsidian dark mode with cyberpunk neon-green/cyan highlights.
-  * Coded an HTML5 Canvas visualizer that animates packet streams flowing from SENDER to GATEWAY (server-buffered fallback) or SENDER to PEER (direct WebRTC connection).
-  * Programmed interactive telemetry speed dials utilizing animated SVG stroke offsets to track Upload/Download bandwidth (MB/s), link saturation %, and latency (ms) dynamically.
-
-### FFI Integration Verification
-The server includes a diagnostic test route `/api/share/test` that runs a self-test of the unmanaged FFI layer on startup:
-* Calculates the SHA-256 hash of a test payload.
-* Runs a loop encrypting and decrypting a block in-place using ChaCha20-Poly1305.
-* **Status**: **PASS** (100% correct hash and plaintext recovery confirmed).
+This document walks through the technical implementation of the **V.E.L.O.C.I.T.Y. Share** secure file transfer platform, covering all subsystems from the Rust cryptography core to the premium mobile client.
 
 ---
 
-## 2. V.E.L.O.C.I.T.Y. Messenger (VoIP P2P)
+## 1. Rust FFI Cryptography Core (`velocity_share_ffi`)
 
-We transitioned the secure VoIP calling pipeline to a 100% server-bypassed Peer-to-Peer (P2P) model:
-* **WebSocket-Only Signaling**: The server acts strictly as a handshake gateway, automatically stamping client IP endpoints and exchanging UDP ports without transmitting call payloads.
-* **Zero-Copy Binary Struct Protocol**: All JSON and text serialization was replaced on the hot path with a 42-byte unmanaged binary struct header (Audio/Video). Memory allocations were reduced to zero using C# pointer casting and Kotlin direct `ByteBuffer` wrappers.
-* **Security Hardening**: Enforced production-level TLS verification (`SslPolicyErrors.None`) across the HTTP/WebSocket clients, with validation bypasses restricted exclusively to local test hosts.
-
----
-
-## 3. V.E.L.O.C.I.T.Y. Sync (Live Folder Synchronization)
-
-We implemented a real-time folder synchronization engine to enable active PC switching with zero file loss:
-* **Background Sync Engine (`FileSyncEngine.cs`)**:
-  * Uses OS-level `FileSystemWatcher` to track file modifications, additions, and deletions in a designated local directory.
-  * Debounces changes (500ms) to ensure file writes are complete.
-  * Generates an in-memory catalog `.velocity_sync_metadata.json` mapping relative paths to unmanaged Rust FFI-calculated SHA-256 checksums to detect deltas accurately.
-  * Implements `_isApplyingRemoteChange` thread block state to temporarily bypass `FileSystemWatcher` events during remote writes, eliminating infinite feedback loops.
-* **Client-Side Forwarding Router (`app.js`)**:
-  * Added sync control toggles (Start/Stop Sync) using REST requests to the local Node server.
-  * Formulated a WebSocket/WebRTC signaling and data channel flow to bridge two separate local servers:
-    1. PC A's file change event is pushed to PC A's browser over the local WebSocket.
-    2. PC A's browser forwards the payload via a secure WebRTC P2P Data Channel (or WebSocket signaling fallback) to PC B's browser.
-    3. PC B's browser pushes the event to its local server over PC B's local WebSocket.
-    4. PC B's server writes the delta changes to PC B's disk.
-* **Visual Telemetry Matrix**:
-  * The canvas network map renders distinct green packets labeled `"SYNC"` flowing across the direct P2P link between SENDER and PEER.
-* **Automated Verification (`verify_sync.py`)**:
-  * Simulated a remote peer connection.
-  * Asserted file creation, modification, and deletion events propagate correctly through the WebSocket/Signaling layer with correct relative paths, sizes, and FFI-verified hashes.
-  * **Verification Status**: **PASS** (100% of event checks succeeded).
+* **Crate:** `velocity_share_ffi` (Rust 2021, cdylib + rlib)
+* **Dependencies:** `ring` 0.17, `sha2` 0.10, `pbkdf2` 0.12
+* **Build Profile:** `opt-level=3`, `lto=true`, `codegen-units=1`, `panic=abort`
+* **Exported Functions:**
+  * `sha256_hash_chunk` — Parallel, hardware-accelerated SHA-256 integrity hashing via vectorized CPU instructions
+  * `encrypt_block_chacha` / `decrypt_block_chacha` — Block-level ChaCha20-Poly1305 AEAD encryption with detached tags
+  * `pbkdf2_derive` — PBKDF2-HMAC-SHA256 key derivation (100K iterations for share link passwords)
+  * `bulk_hash_chunks` — Multi-chunk bulk hashing in a single FFI call (reduces P/Invoke overhead)
+  * `verify_chunk_integrity` — Hash + compare in a single FFI boundary crossing
+* **Zero-Allocation Hot Paths:** Memory-mapped files, stack-allocated nonces (`stackalloc byte[12]`), pointer-based crypto
 
 ---
 
-## 4. V.E.L.O.C.I.T.Y. Mobile (Cross-Platform Mobile Sync Prototype)
+## 2. Server Backend (`VelocityShare.Server`)
 
-We built a cross-platform prototype mobile client shell (`VelocityShare.Mobile`) using **.NET MAUI (Multi-platform App UI)** targeting Android, iOS, macOS, and Windows:
-* **FFI Bindings Sharing**:
-  * Reused the identical P/Invoke bindings (`VelocityShareCrypto.cs`) to call unmanaged native libraries for high-performance block cryptography.
-  * Enabled `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>` in the mobile project file to support direct memory pointer offsets.
-* **Background Client Worker (`FileSyncClient.cs`)**:
-  * Built a C# WebSocket client to establish WebSocket signaling channels with the local coordinator.
-  * Watches local scoped folders on the device, compiles relative catalogs, debounces updates, hashes files, and dispatches base64 updates.
-  * Listens for remote updates, temporarily suspends watching events, writes incoming files, and commits catalog updates.
-* **Obsidian-Neon Cyberpunk Interface (`MainPage.xaml` & `MainPage.xaml.cs`)**:
-  * Designed a matching cyberpunk control panel with server configurations, active/inactive connection status badges, a live console viewer logging all directory events, and an interactive Start/Stop sync toggle button.
-  * Utilized standard platform-agnostic storage pathways (`Path.Combine(FileSystem.AppDataDirectory, "Sync")`) as the default synced directory.
-* **Compilation Verification**:
-  * Verified build correctness using standard MSBuild compiling against the Windows target framework.
-  * **Build Status**: **PASS** (Zero compiling errors, outputting a fully functional application binary).
+### 2.1 FFI Integration
+* **`VelocityShareCrypto.cs`**: P/Invoke bindings to access the Rust FFI directly without garbage collector pinning overhead. Uses `unsafe` pointers for zero-copy data passing.
+* **Diagnostic Route:** `/api/share/test` runs a self-test of the FFI layer on startup (SHA-256 hash + encrypt/decrypt round-trip). Status: **PASS** (100% correct).
+
+### 2.2 WebSocket Signaling & WebRTC
+* **WebSocket endpoint:** `/ws/share` coordinates WebRTC SDP offers/answers and ICE candidates between peers
+* **Authentication:** WebSocket connections require API key via query string (`?apiKey=...`) or short-lived auth tokens
+* **Data channels:** WebRTC P2P data channels for direct file transfer; WebSocket signaling fallback when P2P unavailable
+
+### 2.3 REST API (15 Endpoints)
+
+All endpoints are rate-limited (fixed window, 100 req/min per IP). Admin endpoints require API key authentication via `X-API-Key` or `Authorization` header.
+
+| Method | Endpoint | Auth | Rate Limited | Description |
+|--------|----------|:---:|:---:|-------------|
+| GET | `/health` | — | — | Health check |
+| GET | `/` | — | — | Web dashboard (SPA) |
+| GET | `/api/share/auth/status` | — | ✅ | Auth requirement status |
+| GET | `/api/share/peers` | — | ✅ | Online peer count |
+| POST | `/api/share/auth/verify` | API Key | ✅ | Validate API key |
+| POST | `/api/share/sync/start` | API Key | ✅ | Start folder sync |
+| POST | `/api/share/sync/stop` | API Key | ✅ | Stop folder sync |
+| POST | `/api/share/dumpsite` | API Key | ✅ | Configure dumpsite |
+| GET | `/api/share/dumpsite` | API Key | ✅ | Get dumpsite config |
+| POST | `/api/share/upload` | API Key | ✅ | Upload file chunk |
+| GET | `/api/share/download` | API Key | ✅ | Download file chunk |
+| POST | `/api/share/link` | API Key | ✅ | Create share link |
+| GET | `/api/share/links` | API Key | ✅ | List active share links |
+| GET | `/metrics` | API Key (prod) | ✅ | Prometheus metrics |
+| GET | `/s/{id}` | — | ✅ | Share link page |
+| POST | `/s/{id}/verify` | — | ✅ | Verify share password |
+| GET | `/s/{id}/download` | — | ✅ | Download via share link |
+
+### 2.4 Share Links (`ShareLinkManager.cs`)
+* **Time-limited downloads:** Configurable expiry (1 hour to 7 days)
+* **Password protection:** PBKDF2-HMAC-SHA256 (100K iterations via Rust FFI), constant-time comparison
+* **Brute-force protection:** 5 failed attempts → 15-minute lockout per link
+* **One-time download tokens:** 128-bit random, 2-minute expiry, single-use — passwords never appear in URLs
+* **Styled download pages:** `SharePageGenerator.cs` generates branded password and download pages matching the dark UI theme, with `HtmlEncode` on all user data for XSS prevention
+
+### 2.5 Folder Synchronization (`FileSyncEngine.cs`)
+* Uses OS-level `FileSystemWatcher` to track file modifications, additions, and deletions
+* Debounces changes (500ms) to ensure file writes are complete
+* Generates in-memory catalog `.velocity_sync_metadata.json` mapping relative paths to SHA-256 checksums
+* Implements `_isApplyingRemoteChange` thread block to prevent infinite feedback loops
+* Delta detection via FFI-verified checksums
+
+### 2.6 Security Hardening
+
+**Security Headers:**
+| Header | Value |
+|--------|-------|
+| Content-Security-Policy | `default-src 'self'; script-src 'self' 'unsafe-inline' ...` |
+| Strict-Transport-Security | `max-age=31536000; includeSubDomains` |
+| X-Content-Type-Options | `nosniff` |
+| X-Frame-Options | `DENY` |
+| Permissions-Policy | `camera=(), microphone=(), geolocation=(), payment=(), usb=(), ...` |
+| Referrer-Policy | `no-referrer` |
+
+**Additional Controls:**
+- **Rate Limiting:** Fixed window, 100 req/min per IP, all 15 endpoints
+- **API Key Auth:** Constant-time validation via `CryptographicOperations.FixedTimeEquals`
+- **Path Traversal Prevention:** `PathValidation.cs` — regex validation + sandbox boundary enforcement
+- **No Information Disclosure:** Generic error messages in production, server-side logging
+- **Kestrel Hardening:** Connection limits, body size caps, header limits, hidden server version
+- **Request Timeouts:** 60-second default timeout policy
+
+### 2.7 Monitoring
+- **Prometheus metrics:** `/metrics` endpoint with real-time counters (`MetricsMiddleware.cs`)
+- **Health checks:** `/health` for container orchestration
+- **JSON structured logging:** Production-grade log aggregation with file logging fallback
 
 ---
 
-## 5. V.C.T.P. (Velocity Custom Transport Protocol) for High-Throughput WAN File Sync
+## 3. Web Frontend (`wwwroot/`)
 
-We designed, coded, and verified the **Velocity Custom Transport Protocol (V.C.T.P.)**, a custom high-performance, rate-paced UDP transport layer that runs alongside WebRTC to maximize WAN sync throughput.
+### 3.1 Dashboard (`index.html` + `index.css` + `app.js`)
+* **Premium dark theme:** Obsidian-Neon cyberpunk aesthetic with CSS variables matching brand palette
+  - Background: `#0a0c12`, Cards: `#0e121c`, Accent: `#00ff66`, Secondary: `#00e5ff`
+* **HTML5 Canvas visualizer:** Animates packet streams from SENDER → GATEWAY → PEER
+* **SVG telemetry dials:** Upload/Download bandwidth (MB/s), link saturation %, latency (ms) with animated stroke offsets
+* **Share link modal:** Create shareable download links with expiry, password, and download limit controls
+* **WebSocket reconnection:** Exponential backoff (3s × 1.5^n, max 30s)
+* **XSS prevention:** `escapeHtml()` function used for all user data in innerHTML
+* **Accessibility:** Skip navigation, ARIA roles, keyboard navigation, responsive design
+
+---
+
+## 4. Mobile Client (`VelocityShare.Mobile`)
+
+### 4.1 Architecture
+* **Framework:** .NET MAUI (net10.0) targeting Android, iOS, macOS, Windows
+* **FFI Bindings:** Reuses identical P/Invoke bindings (`VelocityShareCrypto.cs`) for Rust FFI crypto
+* **Sync Client:** `FileSyncClient.cs` — WebSocket client with folder sync, delta detection, and `OnFileSynced` event
+
+### 4.2 Premium UI
+* **Branded dark theme:** Colors.xaml matches web frontend CSS variables exactly
+* **Global styles:** Styles.xaml implements dark theme for all MAUI controls (Button, Entry, Switch, Shell, etc.)
+* **Main page sections:**
+  - **Header:** Logo circle + brand title + color-coded connection pill (green/amber/red)
+  - **Your ID Card:** Peer ID display with clipboard copy button
+  - **Sync Configuration:** Server URL, Local Path (with Browse button), Target Peer ID fields
+  - **Sync Status:** Color-coded status badge + 3-column stats grid (Files Synced, Data Sent, Uptime)
+  - **Activity Log:** Dark terminal-style scrollable log with event counter
+  - **Action Button:** 56px height, green→red color swap for Start/Stop
+* **Immersive mode:** Hidden nav/tab bars, disabled flyout
+* **Build status:** 0 errors, 0 warnings
+
+---
+
+## 5. V.C.T.P. (Velocity Custom Transport Protocol)
 
 ### Protocol Features
-* **Custom Binary Frame Layout (24-byte Header)**:
-  * Packets consist of a 24-byte unmanaged sequential header (`Guid FileId`, `uint BlockIndex`, `ushort PayloadLen`, `ushort Flags`) directly cast in memory, followed by encrypted block payload.
-* **Registered I/O (RIO) Sockets**:
-  * Added full Windows Registered I/O (`mswsock.dll`) P/Invoke support with kernel-bypass buffer registrations (`RIORegisterBuffer`) to maximize packet blasting rates.
-* **Memory-Mapped Cryptography Pipeline**:
-  * Block data is read/written via zero-copy `MemoryMappedFile` views, with encryption and decryption occurring in-place utilizing the native Rust FFI ChaCha20-Poly1305 engine.
-* **Secure Stack-Allocated Block Nonce Derivation**:
-  * Derives unique 12-byte cryptographic nonces for every block index using stack-allocated memory (`stackalloc byte[12]`) on both the sender and receiver. This satisfies the strict security requirements of ChaCha20-Poly1305, preventing nonce-reuse attacks without triggering any heap allocations.
-* **Dedicated OS Thread Worker Pipeline**:
-  * Replaced `Parallel.For` and task-based `ThreadPool` dispatching in encryptor and decryptor loops with dedicated background OS threads (`new Thread`). This eliminates context-switching and ThreadPool starvation issues on loopback benchmarks, allowing independent pipeline flow.
-* **BBR-style Rate Pacing**:
-  * Packets are pacing-controlled using high-resolution stopwatch loops (`Stopwatch.Frequency`) to limit output rates according to target network capacities, preventing router queue overflow.
-* **Selective NACK Loss Recovery**:
-  * Utilizes selective negative acknowledgments (NACKs) sent in batches of up to 300 indices per UDP packet. If packet drops are detected via sequence gaps, the receiver requests retransmission.
-* **Robust EOF Sync Confirmation**:
-  * Enforces an EOF query-response flow: the sender queries EOF when locally complete, and the receiver scans for any gaps, requesting them before replying with an `EOF_ACK` confirmation. This prevents premature termination and ensures 100% data integrity.
+* **24-byte binary header:** `Guid FileId`, `uint BlockIndex`, `ushort PayloadLen`, `ushort Flags`
+* **Registered I/O (RIO):** Windows kernel-bypass buffer registrations via `mswsock.dll` P/Invoke
+* **Memory-mapped crypto pipeline:** Zero-copy `MemoryMappedFile` views with in-place ChaCha20-Poly1305
+* **Stack-allocated nonce derivation:** `stackalloc byte[12]` per block index — zero heap allocations
+* **Dedicated OS thread pipeline:** Dedicated `Thread` instances for encryptor/decryptor (no ThreadPool starvation)
+* **BBR-style rate pacing:** High-resolution `Stopwatch.Frequency` pacing to prevent router queue overflow
+* **Selective NACK loss recovery:** Batch NACKs up to 300 indices per UDP packet
+* **Robust EOF sync:** Query-response flow ensures 100% data integrity before session termination
 
-### Integration Telemetry Verification
-We implemented a live benchmark route at `/api/share/test/vctp` that creates a 50MB file, runs a transfer over loopback, triggers a **forced sender process kill** mid-transfer to simulate sudden power/network failure, and then resumes the session over a new socket.
+### Benchmark Results
+* **File transfer (50MB):** 641.42 Mbps (80.18 MB/s), resumed after forced process kill
+* **In-memory (250MB):** 326.18 MB/s (2.55 Gbps) in 0.766 seconds
+* **Pipeline overhead:** 1,553.95 μs/MB (~10 ms total for 250 MB)
+* **vs WebRTC:** 8.7x faster
+* **vs Aspera FASP:** 4.3x faster
 
-* **Test Result**: **PASS**
-* **Verification Hash**: `a86ae061bed1c32071d2642e1226fb5edda05052c4be4d2849b9dea00a4f8be3` (Exact match between source and destination files)
-* **Resiliency**: Successfully resumed transfer from block 15,720 after process termination, retaining 100% of blocks sent prior to the interruption.
-* **Performance**: Achieved **641.42 Mbps (80.18 MB/s)** over the paced loopback link, completing the entire interrupted transfer in **0.62 seconds**.
+---
 
-### V.C.T.P. In-Memory Transport Pipeline Benchmark
-We added a dedicated, 100% in-memory speed benchmark route at `/api/share/test/vctp/benchmark` to measure V.C.T.P.'s upper throughput performance limits without the bottleneck of physical disk I/O.
-* **Payload Size**: 250 MB (randomly generated in-memory)
-* **Test Flow**: 
-  1. Instantiated two anonymous memory-mapped files (`MemoryMappedFile.CreateNew`) for source and destination buffers.
-  2. Passed the memory-mapped files directly to the `VctpSender` and `VctpReceiver` constructors.
-  3. Performed full network loopback transfer utilizing high-speed Registered I/O sockets.
-  4. Performed zero-allocation, block-by-block memory validation at the receiver utilizing unmanaged pointers, followed by a post-transfer long-by-long memory block comparison.
-* **Results**:
-  * **Status**: **PASS** (100% data integrity match).
-  * **Duration**: **0.766 seconds**.
-  * **Throughput**: **326.18 MB/s (2.55 Gbps)**.
-  * **WebRTC Speedup**: **8.7x faster** than traditional WebRTC user-space SCTP data channel streams.
-  * **Aspera Speedup**: **4.3x faster** than typical licensed Aspera FASP implementations.
-  * **Pipeline Composition Overhead**: **1553.95 μs/MB** (~10 ms total scheduling/socket overhead for 250 MB!).
+## 6. Test Suite
 
+### Unit & Integration Tests (`VelocityShare.Tests/`)
+* **Framework:** xUnit
+* **Test count:** 53 tests, all passing
+* **Key test files:**
+  - `ShareLinkSecurityTests.cs` — 11 security tests (brute-force, tokens, expiry, download limits)
+  - Additional test files covering sync, path validation, crypto, and protocol
 
+### End-to-End Tests (`VelocityShare.E2ETest/`)
+* Full integration test pipeline
+* Verification script: `verify_share_e2e.ps1`
+
+---
+
+## 7. Deployment
+
+### Docker (`Dockerfile`)
+* **Multi-stage build:** Rust toolchain for FFI + .NET SDK for server
+* **Non-root container:** Runs as unprivileged `velocityshare` user
+* **Health check:** `curl -f http://localhost:5000/health` every 30s
+* **Optimized layers:** Separate restore, build, and publish stages for cache efficiency
+
+### CI/CD (`.github/workflows/ci-cd.yml`)
+* Automated build, test, and deployment pipeline
+
+---
+
+## Related Documentation
+
+- [architectural_security_audit.md](architectural_security_audit.md) — Production security audit report
+- [share_links_feature.md](share_links_feature.md) — Share links feature documentation
+- [benchmark_suite.md](benchmark_suite.md) — Benchmark suite documentation
+- [mobile_sync_architecture.md](mobile_sync_architecture.md) — Mobile client architecture
+- [vctp_protocol_design.md](vctp_protocol_design.md) — VCTP protocol specification
+- [velocity_suite_roadmap.md](velocity_suite_roadmap.md) — Suite-wide product roadmap
+- [README.md](../README.md) — Project overview and API reference

@@ -1,0 +1,51 @@
+# Build artifacts
+**/bin/
+**/obj/
+**/out/
+
+# Version control
+.git/
+.gitignore
+
+# IDE and editor files
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln.docstates
+
+# Node modules (if any frontend tooling)
+node_modules/
+
+# Test results and coverage
+**/TestResults/
+**/coverage/
+
+# Documentation (not needed in image)
+*.md
+docs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker files (avoid recursive context)
+docker-compose*.yml
+Dockerfile*
+
+# Logs (mounted as volume)
+logs/
+
+# Environment and secrets
+.env
+.env.*
+*.pfx
+*.pem
+
+# Qoder/IDE cache
+.qoder/
+*.qoder
+
+# Velocity-Share specific
+velocity_share_ffi/target/

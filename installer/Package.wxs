@@ -1,0 +1,80 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:firewall="http://wixtoolset.org/schemas/v4/wxs/firewall">
+
+  <Package Name="V.E.L.O.C.I.T.Y. Share"
+           Manufacturer="VelocityShare"
+           Version="1.0.0.0"
+           UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of VelocityShare is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPHELPLINK" Value="https://github.com/velocityshare/velocityshare" />
+    <Property Id="ARPURLINFOABOUT" Value="Secure peer-to-peer file transfer with end-to-end encryption" />
+
+    <!-- Directory Structure -->
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="VelocityShare">
+        <Directory Id="DATADIR" Name="data" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="VelocityShareData" Name="VelocityShare" />
+    </StandardDirectory>
+
+    <!-- Main Service Component -->
+    <Component Id="MainService" Directory="INSTALLFOLDER" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+      <File Id="ServerExe"
+            Name="VelocityShare.Server.exe"
+            Source="..\publish\VelocityShare.Server\VelocityShare.Server.exe"
+            KeyPath="yes" />
+
+      <ServiceInstall Id="ServiceInstaller"
+                      Name="VelocityShare"
+                      DisplayName="V.E.L.O.C.I.T.Y. Share Server"
+                      Description="Secure peer-to-peer file transfer server with end-to-end encryption"
+                      Type="ownProcess"
+                      Start="auto"
+                      ErrorControl="normal"
+                      Arguments="--urls http://0.0.0.0:5000"
+                      Vital="yes" />
+
+      <ServiceControl Id="ServiceController"
+                      Name="VelocityShare"
+                      Start="install"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="yes" />
+
+      <firewall:FirewallException Id="FirewallRule"
+                                  Name="VelocityShare Server"
+                                  Port="5000"
+                                  Protocol="tcp"
+                                  Scope="any"
+                                  Profile="all"
+                                  Description="Allow inbound connections to VelocityShare server" />
+    </Component>
+
+    <!-- Data directory (writable, persists across upgrades) -->
+    <Component Id="DataDirectory" Directory="VelocityShareData" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
+      <CreateFolder />
+      <RemoveFolder Id="RemoveDataDir" On="uninstall" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\VelocityShare"
+                     Name="DataPath"
+                     Type="string"
+                     Value="[VelocityShareData]"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- Feature definition -->
+    <Feature Id="Complete" Title="VelocityShare Server" Level="1">
+      <ComponentGroupRef Id="ServerFiles" />
+      <ComponentRef Id="MainService" />
+      <ComponentRef Id="DataDirectory" />
+    </Feature>
+
+  </Package>
+</Wix>

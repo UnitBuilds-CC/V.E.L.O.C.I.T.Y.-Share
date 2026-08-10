@@ -1,98 +1,191 @@
-# Architectural Blueprint: V.E.L.O.C.I.T.Y. Share Mobile (Android/iOS)
+# Mobile Client Architecture: V.E.L.O.C.I.T.Y. Share
 
-This document outlines the architectural design for extending **V.E.L.O.C.I.T.Y. Share** to Android and iOS devices, enabling secure, automated background syncing of mobile galleries (DCIM), ebooks, documents, and other user data directly with a PC node or cloud instance.
+**Status:** IMPLEMENTED ✅  
+**Framework:** .NET MAUI (net10.0)  
+**Targets:** Android, iOS, macOS, Windows  
+**Last Updated:** August 2026  
 
 ---
 
-## 1. System Architecture
+## Overview
 
-To maintain the zero-trust, high-performance nature of V.E.L.O.C.I.T.Y. Share, the mobile app will function as a native peer, negotiating direct **WebRTC P2P Data Channels** with PC nodes and using the signaling hub as a coordinator or fallback dropsite.
+The V.E.L.O.C.I.T.Y. Share mobile client is a cross-platform .NET MAUI application that enables secure, automated folder synchronization between mobile devices and PC nodes. It shares the same Rust FFI cryptography layer as the server, ensuring consistent ChaCha20-Poly1305 encryption and SHA-256 integrity verification across all platforms.
 
-```mermaid
-graph TD
-    subgraph Mobile Device (Android / iOS)
-        Media[Gallery / DCIM / Ebooks / Docs]
-        AppUI[Mobile Command Center UI]
-        SyncWorker[Background Sync Worker]
-        MobileFFI[Mobile Rust Crypto FFI]
-    end
+---
 
-    subgraph PC Node
-        LocalDir[Local Directory]
-        PCServer[C# local server]
-        PCBrowser[Dashboard UI]
-    end
+## System Architecture
 
-    subgraph Cloud Instance / Gateway
-        SigServer[WebSocket Signaling Hub]
-        CloudDrop[Encrypted Dumpsite Fallback]
-    end
-
-    SyncWorker -->|Read| Media
-    SyncWorker -->|Frictionless P/Invoke| MobileFFI
-    AppUI -->|Controls| SyncWorker
-
-    %% Signaling Route
-    PCServer <-->|Local WebSocket| PCBrowser
-    PCBrowser <-->|WebSocket Signaling| SigServer
-    SyncWorker <-->|WebSocket Signaling| SigServer
-
-    %% Data Sync Route
-    SyncWorker <-->|P2P WebRTC Data Channel| PCBrowser
-    PCBrowser <-->|File Writes| PCServer
-    SyncWorker -.->|Upload Fallback| CloudDrop
-    PCServer -.->|Download Fallback| CloudDrop
+```
+┌─────────────────────────────────────────────────┐
+│              Mobile Device                       │
+│                                                  │
+│  ┌──────────┐  ┌──────────────┐  ┌───────────┐ │
+│  │ MAUI UI  │──│ MainPage.cs  │──│ Rust FFI  │ │
+│  │ (XAML)   │  │ (Code-behind)│  │ Crypto    │ │
+│  └──────────┘  └──────┬───────┘  └───────────┘ │
+│                       │                          │
+│               ┌───────┴────────┐                │
+│               │ FileSyncClient │                │
+│               │ (WebSocket)    │                │
+│               └───────┬────────┘                │
+│                       │                          │
+│               ┌───────┴────────┐                │
+│               │ FileSystem     │                │
+│               │ Watcher        │                │
+│               └────────────────┘                │
+└───────────────────────┬─────────────────────────┘
+                        │ WebSocket Signaling
+                        ▼
+              ┌──────────────────┐
+              │  V.E.L.O.C.I.T.Y │
+              │  Share Server    │
+              │  (ASP.NET Core)  │
+              └────────┬─────────┘
+                       │ WebSocket / WebRTC
+                       ▼
+              ┌──────────────────┐
+              │  Peer PC Node    │
+              │  (Web Dashboard) │
+              └──────────────────┘
 ```
 
 ---
 
-## 2. Cross-Platform Technology Strategy
+## Implementation Details
 
-To maximize code reuse, stability, and speed of delivery, we recommend using **.NET MAUI (Multi-platform App UI)** or **Flutter with Rust Bindings**. 
+### Core Components
 
-### The .NET MAUI Advantage (Recommended)
-Since the V.E.L.O.C.I.T.Y. Share backend is written in **ASP.NET Core (.NET 10)**, a .NET MAUI application offers unmatched architectural synergy:
-1. **Shared Cryptography Layer**: The unmanaged C# P/Invoke bindings (`VelocityShareCrypto.cs`) can be copied directly into the mobile project.
-2. **Shared Sync Logic**: The metadata compile and delta calculation algorithms (`FileSyncEngine.cs`) can be shared with minimal modifications.
-3. **Rust FFI Reuse**: We can load the exact same compiled Rust FFI library natively on Android and iOS.
+| File | Responsibility |
+|------|---------------|
+| `MainPage.xaml` | Premium dark UI with branded design system |
+| `MainPage.xaml.cs` | UI logic, sync stats, connection indicators, log viewer |
+| `FileSyncClient.cs` | WebSocket sync client with FileSystemWatcher |
+| `VelocityShareCrypto.cs` | Rust FFI P/Invoke bindings (shared with server) |
+| `Resources/Styles/Colors.xaml` | Brand color palette (matched to web frontend) |
+| `Resources/Styles/Styles.xaml` | Global dark theme styles for all MAUI controls |
+
+### FileSyncClient
+
+The `FileSyncClient` class implements the mobile sync engine:
+
+- **WebSocket Signaling**: Connects to the server's `/ws/share` endpoint
+- **FileSystemWatcher**: Monitors local sync folder for changes (create, modify, delete, rename)
+- **Debounced Processing**: 500ms debounce timer prevents redundant sync events
+- **Catalog Tracking**: JSON metadata file (`.velocity_sync_metadata.json`) maps relative paths to SHA-256 hashes
+- **Delta Detection**: Only syncs files whose hash has changed since last sync
+- **Feedback Loop Prevention**: Temporarily disables FileSystemWatcher during remote writes
+- **NDA Binary Protocol**: Uses compact 24-byte binary frames for efficient sync payloads
+
+**Events exposed:**
+- `OnLog(string message)` — Real-time log messages for UI display
+- `OnStatusChanged(string status)` — Connection state changes (ACTIVE, CONNECTING, INACTIVE)
+- `OnFileSynced(string fileName, long fileSize)` — File sync completion for stats tracking
+
+### Rust FFI Integration
+
+The mobile client uses the **same Rust FFI library** as the server:
+
+```csharp
+// VelocityShareCrypto.cs — identical P/Invoke bindings
+[DllImport("velocity_share_ffi")]
+public static extern int sha256_hash_chunk(byte* dataPtr, nuint dataLen, byte* hashOutPtr);
+
+[DllImport("velocity_share_ffi")]
+public static extern int encrypt_block_chacha(byte* keyPtr, byte* noncePtr, ...);
+
+[DllImport("velocity_share_ffi")]
+public static extern int decrypt_block_chacha(byte* keyPtr, byte* noncePtr, ...);
+```
+
+**Cross-compilation targets:**
+- Android: `arm64-v8a`, `armeabi-v7a`, `x86_64` → `libvelocity_share_ffi.so`
+- iOS: `aarch64-apple-ios` → `libvelocity_share_ffi.a`
 
 ---
 
-## 3. Cross-Compiling the Rust Cryptography Core
+## UI Design System
 
-To preserve hardware-accelerated ChaCha20-Poly1305 and SHA-256 chunk hashing on mobile devices, the `velocity_share_ffi` crate will be compiled to native mobile dynamic/static libraries.
+The mobile UI matches the web frontend's premium dark theme with consistent branding.
 
-### Target Compilation Matrix:
-* **Android**: Compiled using `cargo-ndk` to generate target architectures:
-  * `arm64-v8a` (Modern Android devices)
-  * `armeabi-v7a` (Older Android devices)
-  * `x86_64` (Android Emulators)
-  * Output: Packaged inside the Android app under `lib/` as `libvelocity_share_ffi.so`.
-* **iOS**: Compiled using standard target toolchains (e.g. `aarch64-apple-ios` for devices, `aarch64-apple-ios-sim` for Apple Silicon simulators) and wrapped in a static archive framework.
-  * Output: Packaged as `libvelocity_share_ffi.a` inside a Swift-linked framework.
+### Color Palette (Colors.xaml)
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `BgBase` | `#0a0c12` | Page background |
+| `BgSidebar` | `#0d1018` | Header background |
+| `BgCard` | `#0e121c` | Card backgrounds |
+| `BgInput` | `#1a1e2e` | Input fields, borders |
+| `Green` | `#00ff66` | Primary accent, active states |
+| `Cyan` | `#00e5ff` | Secondary accent, peer ID |
+| `Amber` | `#f59e0b` | Warnings, sync icon |
+| `Red` | `#ef4444` | Errors, inactive states |
+| `TextPrimary` | `#f1f5f9` | Main text |
+| `TextSecondary` | `#94a3b8` | Secondary text |
+| `TextMuted` | `#64748b` | Labels, hints |
+
+### UI Sections
+
+1. **Header Bar** — Logo circle + brand title + connection status pill (colored dot + label)
+2. **Your ID Card** — Prominent peer ID display with copy-to-clipboard button
+3. **Sync Configuration Card** — Server URL, local path (with Browse dialog), target peer ID
+4. **Sync Status Card** — Color-coded status badge + 3-column stats grid (files synced, data sent, uptime)
+5. **Activity Log Card** — Styled dark terminal with event counter and color-coded entries
+6. **Action Button** — Large 56px sync toggle (green → red color swap)
+7. **Footer** — Subtle branding text
+
+### Responsive Behavior
+
+- Connection dot changes color: Red (offline) → Amber (connecting) → Green (secure)
+- Status badge updates in real-time with matching colors
+- Sync stats update live: file count, data transferred, uptime timer
+- Log entries are color-coded by type (errors = red, sync client = cyan, other = green)
+- Auto-scroll to latest log entry
 
 ---
 
-## 4. OS-Level Directory Monitoring & Scoped Storage
+## Cross-Platform Considerations
 
-Mobile operating systems enforce strict sandboxing and storage permissions. The app will interface with platform APIs to watch files:
+### Android
+- **Permissions**: `READ_MEDIA_IMAGES`, `READ_MEDIA_VIDEO` (Android 13+)
+- **Background Sync**: `WorkManager` with `PeriodicWorkRequest` (Wi-Fi + charging constraints)
+- **Storage**: `ContentObserver` on `MediaStore` for real-time gallery monitoring
 
-### Android Implementation
-* **Permissions**: Requires `READ_MEDIA_IMAGES` and `READ_MEDIA_VIDEO` (Android 13+) or `MANAGE_EXTERNAL_STORAGE` (for general ebooks/documents directory access).
-* **FileSystem Monitoring**: Instead of standard file watchers, the app registers a `ContentObserver` on the Android `MediaStore` database to listen for additions to the Gallery or DCIM in real time.
-* **Background Worker**: Implements `WorkManager` with a `PeriodicWorkRequest` configured to run when the device is **connected to Wi-Fi** and **charging**, executing a background catalog scan and P2P sync.
+### iOS
+- **Permissions**: `PHPhotoLibrary` access for photos/videos
+- **Background Sync**: `BGProcessingTaskRequest` for opportunistic background execution
+- **Storage**: Scoped sandbox directories via `FileSystem.AppDataDirectory`
 
-### iOS Implementation
-* **Permissions**: Photo Library Access APIs (`PHPhotoLibrary`) and Documents/Ebooks directory sandboxes.
-* **FileSystem Monitoring**: Registers as a delegate to the `PHPhotoLibraryChangeObserver` to capture new photos/videos immediately.
-* **Background Worker**: Implements the `BackgroundTasks` framework (`BGProcessingTaskRequest`), requesting opportunistic background execution slots to negotiate connection and transfer metadata deltas.
+### Windows
+- **Storage**: Standard file system access via `FileSystem.AppDataDirectory`
+- **Default Path**: `Path.Combine(FileSystem.AppDataDirectory, "Sync")`
 
 ---
 
-## 5. Mobile UI Features
+## Build & Deployment
 
-The mobile interface will replicate the obsidian-neon aesthetic in a compact mobile format:
-1. **Live Roster**: View connected PC nodes and cloud dumpsites.
-2. **Automated Folders**: Toggle switches to auto-sync "Camera Roll", "Ebooks", "Downloads", and "Voice Memos".
-3. **Manual File Picker**: Send individual files to the PC with a single tap.
-4. **Link Telemetry**: Compact circular dial meters showing transmission speeds, battery impact, and link latency.
+```powershell
+# Build for Windows
+dotnet build VelocityShare.Mobile -f net10.0-windows10.0.19041.0
+
+# Build for Android
+dotnet build VelocityShare.Mobile -f net10.0-android
+
+# Build for iOS (macOS required)
+dotnet build VelocityShare.Mobile -f net10.0-ios
+```
+
+**Build Status:** ✅ 0 errors, 0 warnings
+
+---
+
+## Future Enhancements
+
+| Feature | Priority | Description |
+|---------|----------|-------------|
+| Native File Picker | High | Platform-specific folder picker UI instead of text prompt |
+| Peer Discovery | High | Automatic detection of available peers on the network |
+| Transfer History | Medium | Persistent log of synced files with re-sync capability |
+| Share Link UI | Medium | Create and manage share links from mobile |
+| Background Sync Service | High | OS-level background worker for continuous sync |
+| Push Notifications | Medium | Alert on incoming file transfers |
+| Battery Optimization | Low | Adaptive sync frequency based on battery level |

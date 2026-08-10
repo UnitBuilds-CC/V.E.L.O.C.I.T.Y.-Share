@@ -2,10 +2,15 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="VelocityShare.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <None Update="velocity_share_ffi.dll">
@@ -17,6 +22,11 @@
     <Reference Include="Velocity.NDA">
       <HintPath>Velocity.NDA.dll</HintPath>
     </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
   </ItemGroup>
 
   <Target Name="CopyRustDll" BeforeTargets="Build">

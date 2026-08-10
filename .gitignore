@@ -1,27 +1,60 @@
-# C# Build Artifacts
-**/[Bb]in/
-**/[Oo]bj/
-**/.vs/
-**/.idea/
-**/.vscode/
+# ── V.E.L.O.C.I.T.Y. Share - Git Ignore ──
 
-# Rust Build Artifacts
-**/target/
+# Secrets and credentials
+.env
+*.pfx
+*.key
+*.pem
 
-# Local Uploads and Temp Directories
-**/wwwroot/uploads/
-**/Updates/
+# Build outputs
+bin/
+obj/
+publish/
+target/
+*.dll
+*.exe
+*.pdb
 
-# User-specific files
-*.rsuser
-*.suo
+# Installer build artifacts
+installer/HarvestedFiles.wxs
+installer/VelocityShare.msi
+installer/VelocityShare.wixpdb
+installer/Output/
+installer/obj/
+installer/bin/
+
+# Benchmark artifacts
+BenchmarkDotNet.Artifacts/
+
+# Runtime data
+*.db
+!velocity_share_ffi/**/*.db
+
+# IDE
+.vs/
+.vscode/
+.idea/
 *.user
-*.userosscache
-*.sln.docstates
+*.suo
 
 # OS files
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Publish folder
-/[Pp]ublish/
+# Logs
+logs/
+*.log
+
+# Uploads (runtime data)
+VelocityShare.Server/wwwroot/uploads/
+
+# Sync metadata
+.velocity_sync_metadata.json
+
+# Rust build
+velocity_share_ffi/target/
+
+# NuGet
+*.nupkg
+packages/
