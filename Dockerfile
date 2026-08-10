@@ -46,6 +46,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:5000/health || exit 1
 
 # Switch to non-root user
+RUN mkdir -p /usr/share/VelocityShare /app/wwwroot/uploads && chown -R velocityshare:velocityshare /usr/share/VelocityShare /app/wwwroot/uploads
 USER velocityshare
 
 ENTRYPOINT ["dotnet", "VelocityShare.Server.dll"]
