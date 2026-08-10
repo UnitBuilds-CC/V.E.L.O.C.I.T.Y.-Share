@@ -51,9 +51,15 @@ public class FileSyncEngineTests : IAsyncDisposable
     [Fact]
     public async Task ApplyRemoteSyncAsync_PathTraversal_Blocked()
     {
-        await _engine.ApplyRemoteSyncAsync("sync_update", "../../../etc/passwd", "abc", new byte[] { 1, 2, 3 });
-        // Should not create file outside test dir
-        Assert.False(File.Exists(Path.Combine(_testDir, "..", "..", "..", "etc", "passwd")));
+        var traversalFile = $"../../../traversal_probe_{Guid.NewGuid():N}";
+        await _engine.ApplyRemoteSyncAsync("sync_update", traversalFile, "abc", new byte[] { 1, 2, 3 });
+        // File must not exist inside the sandbox (traversal was blocked)
+        var escapedPath = Path.GetFullPath(Path.Combine(_testDir, traversalFile));
+        Assert.False(File.Exists(escapedPath),
+            $"Path traversal was not blocked — file found at {escapedPath}");
+        // Also verify no files leaked outside the sandbox
+        var filesOutside = Directory.GetFiles(_testDir, "traversal_probe_*", SearchOption.AllDirectories);
+        Assert.Empty(filesOutside);
     }
 
     [Fact]
