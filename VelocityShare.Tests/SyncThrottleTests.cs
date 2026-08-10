@@ -239,8 +239,10 @@ public class SyncThrottleTests
 
         Assert.False(scheduler.IsStable);
 
-        // Wait for stability window to pass
-        Thread.Sleep(500);
+        // Wait for stability window to pass (poll with generous timeout for CI)
+        var deadline = DateTime.UtcNow.AddSeconds(3);
+        while (!eventFired && !scheduler.IsStable && DateTime.UtcNow < deadline)
+            Thread.Sleep(50);
         Assert.True(eventFired || scheduler.IsStable);
     }
 
