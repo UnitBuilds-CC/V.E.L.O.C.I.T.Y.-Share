@@ -26,4 +26,12 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!-- Copy native FFI library to test output so the runtime can find it -->
+  <Target Name="CopyNativeFfi" AfterTargets="Build"
+          Condition="Exists('..\velocity_share_ffi\target\release\libvelocity_share_ffi.so')">
+    <Copy SourceFiles="..\velocity_share_ffi\target\release\libvelocity_share_ffi.so"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>
