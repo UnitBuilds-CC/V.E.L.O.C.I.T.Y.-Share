@@ -290,6 +290,12 @@ select { cursor: pointer; }
     font-family: 'Inter', sans-serif; font-weight: 500; transition: all 150ms;
 }
 .history-share-btn:hover { border-color: var(--green); color: var(--green); }
+.history-retry-btn {
+    background: none; border: 1px solid var(--border); color: var(--text-2);
+    padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
+    font-family: 'Inter', sans-serif; font-weight: 500; transition: all 150ms;
+}
+.history-retry-btn:hover { border-color: var(--cyan); color: var(--cyan); }
 
 /* ETA DISPLAY */
 .transfer-eta {
