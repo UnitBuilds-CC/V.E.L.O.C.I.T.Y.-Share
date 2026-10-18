@@ -972,6 +972,11 @@ app.Map("/ws/share", async (HttpContext context) =>
                                     }
                                     else
                                     {
+                                        // Log WebRTC signaling messages
+                                        if (msgType == "webrtc_offer" || msgType == "webrtc_answer" || msgType == "ice_candidate")
+                                        {
+                                            logger.LogInformation("[WebSocket] Forwarding {MsgType} from {PeerId} to {Target}", msgType, peerId, target);
+                                        }
                                         await targetSocket.SendAsync(new ArraySegment<byte>(ms.ToArray()), WebSocketMessageType.Text, true, CancellationToken.None);
                                     }
                                 }

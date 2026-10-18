@@ -442,16 +442,39 @@ async function initiateP2PConnection(targetId) {
 // Create RTCPeerConnection object
 function createPeerConnection(targetId) {
     const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19002' }]
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19002' },
+            { urls: 'stun:stun1.l.google.com:19002' },
+            { urls: 'stun:stun2.l.google.com:19002' }
+        ]
     });
     
     pc.onicecandidate = (event) => {
         if (event.candidate) {
+            console.log(`[P2P] ICE candidate gathered for ${targetId}:`, event.candidate.candidate);
             sendSignaling(targetId, {
                 type: 'ice_candidate',
                 candidate: event.candidate
             });
+        } else {
+            console.log(`[P2P] ICE candidate gathering complete for ${targetId}`);
         }
+    };
+    
+    pc.onconnectionstatechange = () => {
+        console.log(`[P2P] Connection state change for ${targetId}:`, pc.connectionState);
+        if (pc.connectionState === 'connected') {
+            peerConnectionStates[targetId] = 'connected';
+            refreshPeerStatusUI(targetId);
+        } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+            console.error(`[P2P] Connection ${pc.connectionState} for ${targetId}`);
+            peerConnectionStates[targetId] = 'disconnected';
+            refreshPeerStatusUI(targetId);
+        }
+    };
+    
+    pc.oniceconnectionstatechange = () => {
+        console.log(`[P2P] ICE connection state for ${targetId}:`, pc.iceConnectionState);
     };
     
     pc.ondatachannel = (event) => {
@@ -572,11 +595,15 @@ function triggerFileDownload(name, url) {
 // Dispatch signaling messages via WebSocket Server
 function sendSignaling(target, payload) {
     if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
+        const msg = {
             target: target,
             sender: myPeerId,
             ...payload
-        }));
+        };
+        console.log(`[P2P] Sending signaling to ${target}:`, msg.type);
+        ws.send(JSON.stringify(msg));
+    } else {
+        console.error(`[P2P] Cannot send signaling to ${target}: WebSocket not open (state: ${ws?.readyState})`);
     }
 }
 
