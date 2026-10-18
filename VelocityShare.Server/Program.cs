@@ -1128,6 +1128,32 @@ app.Map("/ws/share", async (HttpContext context) =>
                                 });
                             }
                             } // end if (syncEngine != null)
+                            else if (message.Action == "offer") // VCTP Offer without sync engine -> save to dropsite
+                            {
+                                string file = message.FilePath;
+                                string hash = message.HashHex;
+                                Guid fid = message.FileId;
+                                byte[] key = message.Key;
+                                byte[] nonce = message.Nonce;
+
+                                string dropsiteFolder = Path.Combine(AppContext.BaseDirectory, "dropsite");
+                                Directory.CreateDirectory(dropsiteFolder);
+
+                                var receiver = new VctpReceiver(dropsiteFolder, key, nonce, port: 0);
+                                activeReceivers[fid] = receiver;
+
+                                receiver.OnTransferComplete += (filePath, fileHash) =>
+                                {
+                                    receiver.Dispose();
+                                    activeReceivers.TryRemove(fid, out _);
+                                    logger.LogInformation("[VCTP Dropsite] Transfer complete: {File} (saved to {Folder})", file, dropsiteFolder);
+                                };
+                                receiver.Start();
+
+                                byte[] acceptPacket = Protocol.NdaSignaling.CreateAccept(peerId, fid, receiver.Port);
+                                await webSocket.SendAsync(new ArraySegment<byte>(acceptPacket), WebSocketMessageType.Binary, true, CancellationToken.None);
+                                logger.LogInformation("[VCTP Dropsite] Accepting transfer of {File} ({Size} bytes) -> {Folder}", file, message.FileSize, dropsiteFolder);
+                            }
                         }
                         else if (activePeers.TryGetValue(target, out var targetSocket) && targetSocket.State == WebSocketState.Open)
                         {
