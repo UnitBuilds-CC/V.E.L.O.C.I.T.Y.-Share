@@ -347,7 +347,6 @@ namespace VelocityShare.Mobile
 
                 // Track progress
                 var totalBytes = fileInfo.Length;
-                var lastReportedProgress = -1;
 
                 // Send with progress tracking
                 var response = await _httpClient.SendAsync(
