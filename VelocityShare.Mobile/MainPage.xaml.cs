@@ -1,6 +1,9 @@
 using System;
 using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Maui.Controls;
 using Microsoft.Maui.ApplicationModel;
 using Microsoft.Maui.Storage;
@@ -11,6 +14,7 @@ namespace VelocityShare.Mobile
     public partial class MainPage : ContentPage
     {
         private readonly FileSyncClient _syncClient;
+        private readonly HttpClient _httpClient;
         private string _myPeerId = "";
         private bool _isSyncing = false;
         private int _logEventCount = 0;
@@ -18,11 +22,13 @@ namespace VelocityShare.Mobile
         private long _dataSentBytes = 0;
         private DateTime _syncStartTime;
         private Timer? _uptimeTimer;
+        private CancellationTokenSource? _transferCts;
 
         public MainPage()
         {
             InitializeComponent();
             _syncClient = new FileSyncClient();
+            _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
 
             // Set up event listeners
             _syncClient.OnLog += LogToConsole;
@@ -240,6 +246,200 @@ namespace VelocityShare.Mobile
             if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
             if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
             return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
+        }
+
+        // ── File Transfer Methods ──
+
+        private async void OnPickFileClicked(object? sender, EventArgs e)
+        {
+            try
+            {
+                var result = await FilePicker.Default.PickAsync(new PickOptions
+                {
+                    PickerTitle = "Select file to send",
+                });
+
+                if (result != null)
+                {
+                    await SendFileAsync(result.FullPath, result.FileName);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"[Error] File picker failed: {ex.Message}");
+                await this.DisplayAlertAsync("File Picker Error",
+                    $"Could not pick file:\n{ex.Message}", "OK");
+            }
+        }
+
+        private async void OnPickPhotoClicked(object? sender, EventArgs e)
+        {
+            try
+            {
+                var result = await MediaPicker.Default.PickPhotoAsync(new MediaPickerOptions
+                {
+                    Title = "Select photo to send",
+                });
+
+                if (result != null)
+                {
+                    await SendFileAsync(result.FullPath, result.FileName);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"[Error] Photo picker failed: {ex.Message}");
+                await this.DisplayAlertAsync("Photo Picker Error",
+                    $"Could not pick photo:\n{ex.Message}", "OK");
+            }
+        }
+
+        private async Task SendFileAsync(string filePath, string fileName)
+        {
+            string serverUrl = ServerUrlEntry.Text?.Trim() ?? "";
+            string targetPeerId = SendPeerIdEntry.Text?.Trim() ?? "";
+
+            if (string.IsNullOrEmpty(serverUrl))
+            {
+                await this.DisplayAlertAsync("Validation Error",
+                    "Please enter the server URL before sending files.", "OK");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(targetPeerId))
+            {
+                await this.DisplayAlertAsync("Validation Error",
+                    "Please enter the recipient peer ID before sending files.", "OK");
+                return;
+            }
+
+            var fileInfo = new FileInfo(filePath);
+            if (!fileInfo.Exists)
+            {
+                await this.DisplayAlertAsync("File Error",
+                    $"File not found: {filePath}", "OK");
+                return;
+            }
+
+            // Show progress UI
+            TransferProgressContainer.IsVisible = true;
+            TransferFileName.Text = $"📎 {fileName} ({FormatFileSize(fileInfo.Length)})";
+            TransferProgressBar.Progress = 0;
+            TransferSpeedLabel.Text = "Starting transfer...";
+
+            _transferCts = new CancellationTokenSource();
+            var token = _transferCts.Token;
+            var startTime = DateTime.UtcNow;
+
+            LogToConsole($"[Transfer] Sending {fileName} ({FormatFileSize(fileInfo.Length)}) to {targetPeerId}");
+
+            try
+            {
+                // Upload file via server dropsite endpoint
+                using var fileStream = File.OpenRead(filePath);
+                using var content = new StreamContent(fileStream);
+                content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+
+                var requestUrl = $"{serverUrl.TrimEnd('/')}/api/share/upload?fileName={Uri.EscapeDataString(fileName)}&targetPeer={Uri.EscapeDataString(targetPeerId)}&senderPeerId={Uri.EscapeDataString(_myPeerId)}";
+
+                using var request = new HttpRequestMessage(HttpMethod.Post, requestUrl);
+                request.Content = content;
+
+                // Track progress
+                var totalBytes = fileInfo.Length;
+                var lastReportedProgress = -1;
+
+                // Send with progress tracking
+                var response = await _httpClient.SendAsync(
+                    new HttpRequestMessage(HttpMethod.Post, requestUrl)
+                    {
+                        Content = new ProgressStreamContent(fileStream, totalBytes, progress =>
+                        {
+                            MainThread.BeginInvokeOnMainThread(() =>
+                            {
+                                var pct = (double)progress / totalBytes;
+                                TransferProgressBar.Progress = pct;
+
+                                var elapsed = (DateTime.UtcNow - startTime).TotalSeconds;
+                                var speed = elapsed > 0 ? progress / elapsed : 0;
+                                TransferSpeedLabel.Text = $"{FormatFileSize((long)speed)}/s \u00B7 {FormatFileSize(progress)} / {FormatFileSize(totalBytes)}";
+                            });
+                        })
+                    },
+                    token);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    TransferProgressBar.ProgressColor = Color.FromArgb("#00ff66");
+                    TransferSpeedLabel.Text = "Transfer complete!";
+                    LogToConsole($"[Transfer] Successfully sent {fileName} to {targetPeerId}");
+                    await this.DisplayAlertAsync("Transfer Complete",
+                        $"{fileName} sent successfully!", "OK");
+                }
+                else
+                {
+                    var error = await response.Content.ReadAsStringAsync();
+                    throw new Exception($"Server returned {(int)response.StatusCode}: {error}");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                TransferSpeedLabel.Text = "Transfer cancelled";
+                TransferProgressBar.ProgressColor = Color.FromArgb("#f59e0b");
+                LogToConsole("[Transfer] Cancelled by user");
+            }
+            catch (Exception ex)
+            {
+                TransferSpeedLabel.Text = "Transfer failed";
+                TransferProgressBar.ProgressColor = Color.FromArgb("#ef4444");
+                LogToConsole($"[Error] Transfer failed: {ex.Message}");
+                await this.DisplayAlertAsync("Transfer Error",
+                    $"Failed to send file:\n{ex.Message}", "OK");
+            }
+            finally
+            {
+                _transferCts?.Dispose();
+                _transferCts = null;
+                // Hide progress after a delay
+                await Task.Delay(3000);
+                TransferProgressContainer.IsVisible = false;
+            }
+        }
+    }
+
+    // ── Progress-tracking stream content ──
+    internal class ProgressStreamContent : HttpContent
+    {
+        private readonly Stream _content;
+        private readonly long _totalBytes;
+        private readonly Action<long> _onProgress;
+
+        public ProgressStreamContent(Stream content, long totalBytes, Action<long> onProgress)
+        {
+            _content = content;
+            _totalBytes = totalBytes;
+            _onProgress = onProgress;
+            Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        }
+
+        protected override async Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context)
+        {
+            var buffer = new byte[81920]; // 80KB chunks
+            long bytesReadTotal = 0;
+            int bytesRead;
+
+            while ((bytesRead = await _content.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            {
+                await stream.WriteAsync(buffer, 0, bytesRead);
+                bytesReadTotal += bytesRead;
+                _onProgress(bytesReadTotal);
+            }
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = _totalBytes;
+            return true;
         }
     }
 }

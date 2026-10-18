@@ -68,6 +68,60 @@
                     </VerticalStackLayout>
                 </Border>
 
+                <!-- ── FILE TRANSFER CARD ── -->
+                <Border BackgroundColor="{StaticResource BgCard}" Stroke="{StaticResource Border}"
+                        StrokeThickness="1" StrokeShape="RoundRectangle 14" Padding="20">
+                    <VerticalStackLayout Spacing="14">
+                        <!-- Card header -->
+                        <HorizontalStackLayout Spacing="10">
+                            <Border WidthRequest="34" HeightRequest="34"
+                                    BackgroundColor="#001a0d" Stroke="{StaticResource Green}"
+                                    StrokeThickness="1" StrokeShape="RoundRectangle 8">
+                                <Label Text="↑" FontSize="18" TextColor="{StaticResource Green}"
+                                       HorizontalOptions="Center" VerticalOptions="Center"/>
+                            </Border>
+                            <VerticalStackLayout VerticalOptions="Center" Spacing="0">
+                                <Label Text="Send Files" FontSize="15" FontAttributes="Bold"
+                                       TextColor="{StaticResource TextPrimary}"/>
+                                <Label Text="Transfer files to connected peers" FontSize="11"
+                                       TextColor="{StaticResource TextMuted}"/>
+                            </VerticalStackLayout>
+                        </HorizontalStackLayout>
+
+                        <BoxView HeightRequest="1" Color="{StaticResource Border}" Margin="0,4,0,0"/>
+
+                        <!-- Target Peer for sending -->
+                        <VerticalStackLayout Spacing="4">
+                            <Label Text="RECIPIENT PEER ID" FontSize="10" FontAttributes="Bold"
+                                   TextColor="{StaticResource TextMuted}" CharacterSpacing="1"/>
+                            <Entry x:Name="SendPeerIdEntry" Placeholder="e.g. peer_ab12cd"
+                                   TextColor="{StaticResource TextPrimary}"/>
+                        </VerticalStackLayout>
+
+                        <!-- Transfer progress -->
+                        <VerticalStackLayout x:Name="TransferProgressContainer" IsVisible="False" Spacing="6">
+                            <Label x:Name="TransferFileName" Text="" FontSize="12"
+                                   TextColor="{StaticResource TextSecondary}"/>
+                            <ProgressBar x:Name="TransferProgressBar" Progress="0" ProgressColor="{StaticResource Green}"
+                                         HeightRequest="8"/>
+                            <Label x:Name="TransferSpeedLabel" Text="" FontSize="10"
+                                   TextColor="{StaticResource TextMuted}"/>
+                        </VerticalStackLayout>
+
+                        <!-- Action buttons -->
+                        <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                            <Button Text="PICK FILE" Clicked="OnPickFileClicked"
+                                    Style="{StaticResource OutlineButton}"
+                                    FontSize="12" Padding="12,10" CornerRadius="8"
+                                    MinimumHeightRequest="44"/>
+                            <Button Grid.Column="1" Text="PICK PHOTO" Clicked="OnPickPhotoClicked"
+                                    Style="{StaticResource OutlineButton}"
+                                    FontSize="12" Padding="12,10" CornerRadius="8"
+                                    MinimumHeightRequest="44"/>
+                        </Grid>
+                    </VerticalStackLayout>
+                </Border>
+
                 <!-- ── SYNC CONFIGURATION CARD ── -->
                 <Border BackgroundColor="{StaticResource BgCard}" Stroke="{StaticResource Border}"
                         StrokeThickness="1" StrokeShape="RoundRectangle 14" Padding="20">
