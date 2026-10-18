@@ -641,14 +641,11 @@ async function dispatchFile(file) {
         (window.crypto || window.msCrypto).getRandomValues(arr);
         return Array.from(arr, b => b.toString(36).padStart(2, '0')).join('').substring(0, 16).padEnd(16, '\0');
     })();
-    const chunkSize = 1024 * 64; // 64KB blocks
+    const chunkSize = 256 * 1024; // 256KB blocks for better throughput
     const chunksCount = Math.ceil(file.size / chunkSize);
     
-    // â”€â”€ File size validation â”€â”€
-    if (file.size > 50 * 1024 * 1024) {
-        showToast(`File "${file.name}" exceeds 50 MB limit.`, 'error');
-        return;
-    }
+    // P2P WebRTC path has no file size limit (chunked 64KB streaming).
+    // Server HTTP fallback is limited to 50 MB by Kestrel MaxRequestBodySize.
     
     // Check if we have active WebRTC channels for P2P streaming
     const activePeerIds = Object.keys(dataChannels).filter(id => dataChannels[id].readyState === "open");
@@ -701,7 +698,17 @@ async function dispatchFile(file) {
                 createStreamParticle('sender', 'peer', '#00ff66');
                 
                 updateTransferProgress(fileId, i + 1, chunksCount, uploadStartTime, file.size);
-                await new Promise(r => setTimeout(r, 10)); // pacing flow control
+                
+                // Adaptive flow control: wait when WebRTC buffer is full, otherwise continue immediately
+                if (dc.bufferedAmount > 16 * 1024 * 1024) { // 16 MB buffer threshold
+                    await new Promise(resolve => {
+                        const check = () => {
+                            if (dc.bufferedAmount < 8 * 1024 * 1024) resolve(); // resume at 8 MB
+                            else setTimeout(check, 50);
+                        };
+                        check();
+                    });
+                }
             }
         } else {
             // Fallback server-buffered HTTPS upload
