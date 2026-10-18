@@ -1606,6 +1606,11 @@ namespace VelocityShare.Server
         private readonly bool _bypassCrypto;
         private bool _connected = false;
         private readonly ThreadLocal<AesGcm?> _threadLocalAes;
+        private int _lastFlushedIndex = -1;
+        private FileStream? _writeStream;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool FlushViewOfFile(IntPtr lpBaseAddress, UIntPtr dwNumberOfBytes);
 
         public event Action<int, int>? OnProgress;
         public event Action<string>? OnLog;
@@ -1967,21 +1972,24 @@ namespace VelocityShare.Server
             }
             else
             {
-                _mmf = MemoryMappedFile.CreateFromFile(_targetFilePath, FileMode.Open, null, 0, MemoryMappedFileAccess.ReadWrite);
-                _mmfAccessor = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite);
+                // Use direct file I/O with WriteThrough to avoid massive MMF flush at cleanup
+                _writeStream = new FileStream(_targetFilePath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite, 65536, FileOptions.WriteThrough | FileOptions.RandomAccess);
             }
-            _safeBuffer = _mmfAccessor.SafeMemoryMappedViewHandle;
-
-            byte* ptr = null;
-            _safeBuffer.AcquirePointer(ref ptr);
-            _mmfPtr = (IntPtr)ptr;
-
-            // Warm the memory pages if we are in direct memory bypass mode to avoid page faults during transfer!
-            if (_directSender != null && _bypassCrypto)
+            
+            if (_mmfAccessor != null)
             {
-                for (long offset = 0; offset < _fileSize; offset += 4096)
+                _safeBuffer = _mmfAccessor.SafeMemoryMappedViewHandle;
+                byte* ptr = null;
+                _safeBuffer.AcquirePointer(ref ptr);
+                _mmfPtr = (IntPtr)ptr;
+
+                // Warm the memory pages if we are in direct memory bypass mode to avoid page faults during transfer!
+                if (_directSender != null && _bypassCrypto)
                 {
-                    ptr[offset] = 0;
+                    for (long offset = 0; offset < _fileSize; offset += 4096)
+                    {
+                        ptr[offset] = 0;
+                    }
                 }
             }
         }
@@ -2159,35 +2167,81 @@ namespace VelocityShare.Server
             byte* pCiphertext = pPayload;
             byte* pTag = pPayload + length;
 
-            byte* pMmf = (byte*)_mmfPtr.ToPointer();
-
             var aes = _threadLocalAes.Value;
-            if (!_bypassCrypto && aes != null)
+            if (_writeStream != null)
             {
-                Span<byte> blockNonce = stackalloc byte[12];
-                _cryptoNonce.CopyTo(blockNonce);
-                blockNonce[8] = (byte)index;
-                blockNonce[9] = (byte)(index >> 8);
-                blockNonce[10] = (byte)(index >> 16);
-                blockNonce[11] = (byte)(index >> 24);
-
-                var ciphertextSpan = new ReadOnlySpan<byte>(pCiphertext, length);
-                var plaintextSpan = new Span<byte>(pMmf + offset, length);
-                var tagSpan = new ReadOnlySpan<byte>(pTag, 16);
-
+                // Direct file I/O path (WriteThrough - no MMF flush needed)
+                byte[] buffer = ArrayPool<byte>.Shared.Rent(length + 16);
                 try
                 {
-                    aes.Decrypt(blockNonce, ciphertextSpan, tagSpan, plaintextSpan);
+                    if (!_bypassCrypto && aes != null)
+                    {
+                        Span<byte> blockNonce = stackalloc byte[12];
+                        _cryptoNonce.CopyTo(blockNonce);
+                        blockNonce[8] = (byte)index;
+                        blockNonce[9] = (byte)(index >> 8);
+                        blockNonce[10] = (byte)(index >> 16);
+                        blockNonce[11] = (byte)(index >> 24);
+
+                        var ciphertextSpan = new ReadOnlySpan<byte>(pCiphertext, length);
+                        var plaintextSpan = new Span<byte>(buffer, 0, length);
+                        var tagSpan = new ReadOnlySpan<byte>(pTag, 16);
+
+                        try
+                        {
+                            aes.Decrypt(blockNonce, ciphertextSpan, tagSpan, plaintextSpan);
+                        }
+                        catch (CryptographicException)
+                        {
+                            OnLog?.Invoke($"[VCTP Receiver] Decryption authentication failed on block {index}. Discarding.");
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        Buffer.MemoryCopy(pCiphertext, (byte*)System.Runtime.InteropServices.MemoryMarshal.GetArrayDataReference(buffer), length, length);
+                    }
+
+                    _writeStream.Seek(offset, SeekOrigin.Begin);
+                    _writeStream.Write(buffer, 0, length);
                 }
-                catch (CryptographicException)
+                finally
                 {
-                    OnLog?.Invoke($"[VCTP Receiver] Decryption authentication failed on block {index}. Discarding.");
-                    return;
+                    ArrayPool<byte>.Shared.Return(buffer);
                 }
             }
             else
             {
-                Buffer.MemoryCopy(pCiphertext, pMmf + offset, length, length);
+                // MMF path (for provided MMF or in-memory transfers)
+                byte* pMmf = (byte*)_mmfPtr.ToPointer();
+
+                if (!_bypassCrypto && aes != null)
+                {
+                    Span<byte> blockNonce = stackalloc byte[12];
+                    _cryptoNonce.CopyTo(blockNonce);
+                    blockNonce[8] = (byte)index;
+                    blockNonce[9] = (byte)(index >> 8);
+                    blockNonce[10] = (byte)(index >> 16);
+                    blockNonce[11] = (byte)(index >> 24);
+
+                    var ciphertextSpan = new ReadOnlySpan<byte>(pCiphertext, length);
+                    var plaintextSpan = new Span<byte>(pMmf + offset, length);
+                    var tagSpan = new ReadOnlySpan<byte>(pTag, 16);
+
+                    try
+                    {
+                        aes.Decrypt(blockNonce, ciphertextSpan, tagSpan, plaintextSpan);
+                    }
+                    catch (CryptographicException)
+                    {
+                        OnLog?.Invoke($"[VCTP Receiver] Decryption authentication failed on block {index}. Discarding.");
+                        return;
+                    }
+                }
+                else
+                {
+                    Buffer.MemoryCopy(pCiphertext, pMmf + offset, length, length);
+                }
             }
 
             lock (_stateLock)
@@ -2322,7 +2376,7 @@ namespace VelocityShare.Server
             }
         }
 
-        private void FlushMetadata(object? state)
+        private unsafe void FlushMetadata(object? state)
         {
             if (_metadata != null && !_isFinished && _providedMmf == null && _providedAccessor == null)
             {
@@ -2331,10 +2385,56 @@ namespace VelocityShare.Server
                     _metadata.Save(_metaFilePath);
                 }
             }
+
+            // Incrementally flush MMF dirty pages to prevent massive flush at cleanup
+            if (_mmfPtr != IntPtr.Zero && !_isFinished && !_isFinalizing && _providedMmf == null && _providedAccessor == null)
+            {
+                int highestIdx;
+                lock (_stateLock) { highestIdx = _highestReceivedIndex; }
+                if (highestIdx > _lastFlushedIndex)
+                {
+                    long offset = (long)(_lastFlushedIndex + 1) * _blockSize;
+                    long size = (long)(highestIdx - _lastFlushedIndex) * _blockSize;
+                    // Clamp to file size
+                    if (offset + size > _fileSize) size = _fileSize - offset;
+                    if (size > 0)
+                    {
+                        IntPtr flushAddr = (IntPtr)((byte*)_mmfPtr + offset);
+                        FlushViewOfFile(flushAddr, (UIntPtr)size);
+                    }
+                    _lastFlushedIndex = highestIdx;
+                }
+            }
         }
 
         private unsafe void CleanupReceiverMmf()
         {
+            // Direct file I/O path - just close the stream (WriteThrough ensures data is on disk)
+            if (_writeStream != null)
+            {
+                _writeStream.Dispose();
+                _writeStream = null;
+                return;
+            }
+
+            // MMF path - final incremental flush before disposing
+            if (_mmfPtr != IntPtr.Zero && _providedMmf == null && _providedAccessor == null)
+            {
+                int highestIdx;
+                lock (_stateLock) { highestIdx = _highestReceivedIndex; }
+                if (highestIdx > _lastFlushedIndex)
+                {
+                    long offset = (long)(_lastFlushedIndex + 1) * _blockSize;
+                    long size = (long)(highestIdx - _lastFlushedIndex) * _blockSize;
+                    if (offset + size > _fileSize) size = _fileSize - offset;
+                    if (size > 0)
+                    {
+                        IntPtr flushAddr = (IntPtr)((byte*)_mmfPtr + offset);
+                        FlushViewOfFile(flushAddr, (UIntPtr)size);
+                    }
+                }
+            }
+
             if (_safeBuffer != null && _mmfPtr != IntPtr.Zero)
             {
                 _safeBuffer.ReleasePointer();
