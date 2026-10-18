@@ -78,7 +78,9 @@ graph TD
 *   The receiver tracks incoming `BlockIndex` offsets using a high-speed bitmask. If a block is missed, the receiver sends a 24-byte control packet back to the sender containing a list of missing indices. The sender injects these missing blocks back into the transmission stream without halting the pipeline.
 
 ### E. Interruptibility, Resumability & Corruption Prevention
-1.  **File Pre-Allocation**: When a file transfer starts, the receiver immediately creates and pre-allocates the target file on disk to its full length. It opens a `MemoryMappedFile` view over the file. This ensures disk space is reserved and allows writing blocks out-of-order directly to their absolute file offsets.
+1.  **File Pre-Allocation**: When a file transfer starts, the receiver immediately creates and pre-allocates the target file on disk to its full length. The receiver uses a **hybrid I/O strategy**:
+    - **Sync Engine Path**: Opens a `MemoryMappedFile` view for in-memory transfers used by the folder sync engine (zero-copy pipeline)
+    - **Dropsite Path**: Opens a `FileStream` with `FileOptions.WriteThrough` for direct-to-disk writes (bypasses system cache, eliminates post-transfer flush). This reduces finalization time from 561+ seconds to instant for a 4.3GB file.
 2.  **Persistent Block Journaling**: The receiver writes a companion `.vctmeta` state file containing:
     *   `FileId` (128-bit session ID)
     *   `FileName` and `FileSize`

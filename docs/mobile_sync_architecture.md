@@ -127,11 +127,12 @@ The mobile UI matches the web frontend's premium dark theme with consistent bran
 
 1. **Header Bar** — Logo circle + brand title + connection status pill (colored dot + label)
 2. **Your ID Card** — Prominent peer ID display with copy-to-clipboard button
-3. **Sync Configuration Card** — Server URL, local path (with Browse dialog), target peer ID
-4. **Sync Status Card** — Color-coded status badge + 3-column stats grid (files synced, data sent, uptime)
-5. **Activity Log Card** — Styled dark terminal with event counter and color-coded entries
-6. **Action Button** — Large 56px sync toggle (green → red color swap)
-7. **Footer** — Subtle branding text
+3. **Send Files Card** — File/photo picker buttons, recipient peer ID input, transfer progress bar with speed display
+4. **Sync Configuration Card** — Server URL, local path (with Browse dialog), target peer ID
+5. **Sync Status Card** — Color-coded status badge + 3-column stats grid (files synced, data sent, uptime)
+6. **Activity Log Card** — Styled dark terminal with event counter and color-coded entries
+7. **Action Button** — Large 56px sync toggle (green → red color swap)
+8. **Footer** — Subtle branding text
 
 ### Responsive Behavior
 
@@ -174,18 +175,18 @@ dotnet build VelocityShare.Mobile -f net10.0-android
 dotnet build VelocityShare.Mobile -f net10.0-ios
 ```
 
-**Build Status:** ✅ 0 errors, 0 warnings
+**Build Status:** ✅ Windows: 0 errors, 2 warnings (deprecation only) | Android/iOS: Requires JDK 11+/Xcode toolchain
 
 ---
 
 ## Future Enhancements
 
-| Feature | Priority | Description |
-|---------|----------|-------------|
-| Native File Picker | High | Platform-specific folder picker UI instead of text prompt |
-| Peer Discovery | High | Automatic detection of available peers on the network |
-| Transfer History | Medium | Persistent log of synced files with re-sync capability |
-| Share Link UI | Medium | Create and manage share links from mobile |
-| Background Sync Service | High | OS-level background worker for continuous sync |
-| Push Notifications | Medium | Alert on incoming file transfers |
-| Battery Optimization | Low | Adaptive sync frequency based on battery level |
+| Feature | Priority | Status | Description |
+|---------|----------|--------|-------------|
+| Native File Picker | High | ✅ Done | File and photo picker with progress tracking |
+| Peer Discovery | High | Planned | Automatic detection of available peers on the network |
+| Transfer History | Medium | Planned | Persistent log of synced files with re-sync capability |
+| Share Link UI | Medium | Planned | Create and manage share links from mobile |
+| Background Sync Service | High | Planned | OS-level background worker for continuous sync |
+| Push Notifications | Medium | Planned | Alert on incoming file transfers |
+| Battery Optimization | Low | Planned | Adaptive sync frequency based on battery level |

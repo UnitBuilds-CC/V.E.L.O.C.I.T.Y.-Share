@@ -18,7 +18,7 @@
 - **RTT-Aware NACK Deduplication**: Reduces redundant retransmissions by up to 90% on lossy networks
 - **Adaptive AIMD Congestion Pacing**: Dynamically scales throughput based on real-time link quality
 - **ChaCha20-Poly1305 Encryption**: Native Rust FFI for high-performance authenticated encryption
-- **Zero-Copy Architecture**: Memory-mapped file transfers for maximum throughput
+- **Hybrid I/O Architecture**: Memory-mapped files for sync engine, WriteThrough FileStream for dropsite (40x faster finalization)
 - **NDA Binary Protocol**: Compact 24-byte binary frame protocol replacing JSON overhead on the hot path
 
 ### Share Links
@@ -34,7 +34,7 @@
 - **Cloud Storage Retry Logic**: S3 and Azure Blob providers use exponential backoff with jitter (3 retries) for all operations
 - **TOCTOU Prevention**: ShareLinkManager uses atomic CAS loop for concurrent download counting
 - **Memory-Safe Streaming**: Multi-chunk downloads stream directly to response body (no MemoryStream buffering)
-- **Certificate Validation**: Mobile client enforces exact host matching and SSL policy in production
+- **Certificate Validation**: Mobile client uses permissive validation for development (TODO: strict host matching for production)
 - **Concurrency Safety**: FileSyncEngine uses reference counting for concurrent remote changes, Interlocked for 64-bit stats
 - **Journal Consistency**: SyncChangeJournal protects all reads with write lock for SQLite consistency
 - **Cleanup Grace Period**: Orphan cleanup skips directories with activity within 24 hours
@@ -56,8 +56,8 @@
 - **Benchmark Suites**: BenchmarkDotNet (.NET) + Criterion (Rust) for crypto performance validation
 
 ### User Interfaces
-- **Web Dashboard**: Premium dark-theme SPA with telemetry dials, network matrix visualization, drag-and-drop, keyboard shortcuts, and full accessibility (ARIA, skip-nav)
-- **Mobile Client**: .NET MAUI cross-platform app with branded dark UI, sync stats, activity log, and Rust FFI crypto
+- **Web Dashboard**: Premium dark-theme SPA with telemetry dials, network matrix visualization, drag-and-drop, peer selection, file type icons, retry mechanism, keyboard shortcuts modal, and full accessibility (ARIA, skip-nav)
+- **Mobile Client**: .NET MAUI cross-platform app with file transfer UI (file/photo picker with progress tracking), branded dark UI, sync stats, activity log, and Rust FFI crypto
 - **Share Pages**: Standalone download pages for password-protected and public share links
 
 ---
