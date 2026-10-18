@@ -158,6 +158,7 @@ let latencyPingIntervalId = null; // Track latency ping interval for cleanup
 let reconnectTimeoutId = null;    // Track reconnect timer for cancellation
 let peerConnectionStates = {};     // peerId -> 'disconnected' | 'connecting' | 'connected'
 let telemetryTimerId = null;       // Track telemetry setTimeout chain for cleanup
+let speedHistory = {};             // fileId -> { speeds: [], lastUpdate: number } for rolling average
 
 // â”€â”€ Authentication flow â”€â”€
 async function checkAuthStatus() {
@@ -634,8 +635,34 @@ async function handleSignalingMessage(msg) {
     }
 }
 
+// ── File type icon helper ──
+function getFileTypeIcon(fileName) {
+    const ext = fileName.split('.').pop().toLowerCase();
+    const iconMap = {
+        // Images
+        'jpg': '🖼️', 'jpeg': '🖼️', 'png': '🖼️', 'gif': '🖼️', 'bmp': '🖼️', 'svg': '🖼️', 'webp': '🖼️',
+        // Videos
+        'mp4': '🎬', 'avi': '🎬', 'mkv': '🎬', 'mov': '🎬', 'wmv': '🎬', 'flv': '🎬', 'webm': '🎬',
+        // Audio
+        'mp3': '🎵', 'wav': '🎵', 'flac': '🎵', 'aac': '🎵', 'ogg': '🎵', 'wma': '🎵',
+        // Documents
+        'pdf': '📄', 'doc': '📝', 'docx': '📝', 'txt': '📝', 'rtf': '📝', 'odt': '📝',
+        // Spreadsheets
+        'xls': '📊', 'xlsx': '📊', 'csv': '📊', 'ods': '📊',
+        // Presentations
+        'ppt': '📽️', 'pptx': '📽️', 'odp': '📽️',
+        // Archives
+        'zip': '📦', 'rar': '📦', '7z': '📦', 'tar': '📦', 'gz': '📦', 'bz2': '📦',
+        // Code
+        'js': '💻', 'ts': '💻', 'py': '💻', 'java': '💻', 'cpp': '💻', 'c': '💻', 'rs': '💻', 'go': '💻',
+        // Executables
+        'exe': '⚙️', 'msi': '⚙️', 'dmg': '⚙️', 'app': '⚙️', 'deb': '⚙️', 'rpm': '⚙️',
+    };
+    return iconMap[ext] || '📎';
+}
+
 // Dispatch files in parallel chunks (WebRTC first, Server fallback)
-async function dispatchFile(file) {
+async function dispatchFile(file, targetPeerOverride = null) {
     const fileId = "file_" + (() => {
         const arr = new Uint8Array(16);
         (window.crypto || window.msCrypto).getRandomValues(arr);
@@ -650,6 +677,17 @@ async function dispatchFile(file) {
     // Check if we have active WebRTC channels for P2P streaming
     const activePeerIds = Object.keys(dataChannels).filter(id => dataChannels[id].readyState === "open");
     
+    // If multiple peers available and no override, show peer picker
+    if (!targetPeerOverride && activePeerIds.length > 1) {
+        const selectedPeer = await showPeerPicker(activePeerIds, file.name);
+        if (!selectedPeer) {
+            // User cancelled
+            showToast('Transfer cancelled', 'info', 2000);
+            return;
+        }
+        targetPeerOverride = selectedPeer;
+    }
+    
     // Track upload start time for ETA calculation
     const uploadStartTime = Date.now();
     
@@ -657,8 +695,8 @@ async function dispatchFile(file) {
     
     try {
         if (activePeerIds.length > 0) {
-            // P2P Streaming route
-            const targetPeer = activePeerIds[0];
+            // P2P Streaming route - use selected peer or first available
+            const targetPeer = targetPeerOverride || activePeerIds[0];
             console.log(`[Dispatch] Uploading P2P to: ${targetPeer}`);
             
             const dc = dataChannels[targetPeer];
@@ -781,7 +819,7 @@ function showTransferItem(fileId, name, size, direction) {
         
         const nameSpan = document.createElement('span');
         nameSpan.className = 'transfer-name';
-        nameSpan.textContent = name;
+        nameSpan.textContent = `${getFileTypeIcon(name)} ${name}`;
         
         const detailsSpan = document.createElement('span');
         detailsSpan.className = 'transfer-details';
@@ -830,19 +868,36 @@ function showTransferItem(fileId, name, size, direction) {
 function updateTransferProgress(fileId, current, total, startTime = 0, totalBytes = 0) {
     const pct = Math.floor((current / total) * 100);
     
-    // Calculate ETA
+    // Calculate ETA with rolling average for smoother estimates
     let etaText = '';
     if (startTime > 0 && current > 0 && current < total) {
         const elapsed = (Date.now() - startTime) / 1000;
-        const speed = (totalBytes * (current / total)) / elapsed; // bytes/sec
+        const currentSpeed = (totalBytes * (current / total)) / elapsed; // bytes/sec
+        
+        // Initialize or update speed history for this transfer
+        if (!speedHistory[fileId]) {
+            speedHistory[fileId] = { speeds: [], lastUpdate: Date.now() };
+        }
+        const history = speedHistory[fileId];
+        
+        // Add current speed sample (keep last 10 samples for rolling average)
+        history.speeds.push(currentSpeed);
+        if (history.speeds.length > 10) history.speeds.shift();
+        
+        // Calculate rolling average speed
+        const avgSpeed = history.speeds.reduce((a, b) => a + b, 0) / history.speeds.length;
+        
         const remaining = totalBytes - (totalBytes * (current / total));
-        const etaSec = speed > 0 ? Math.round(remaining / speed) : 0;
+        const etaSec = avgSpeed > 0 ? Math.round(remaining / avgSpeed) : 0;
         if (etaSec < 60) etaText = `${etaSec}s remaining`;
         else if (etaSec < 3600) etaText = `${Math.floor(etaSec / 60)}m ${etaSec % 60}s remaining`;
         else etaText = `${Math.floor(etaSec / 3600)}h ${Math.floor((etaSec % 3600) / 60)}m remaining`;
         
-        const speedMB = (speed / (1024 * 1024)).toFixed(1);
+        const speedMB = (avgSpeed / (1024 * 1024)).toFixed(1);
         etaText = `${speedMB} MB/s \u00B7 ${etaText}`;
+    } else if (current >= total) {
+        // Clean up speed history when transfer completes
+        delete speedHistory[fileId];
     }
     
     // Update both home and full transfer views
@@ -1213,7 +1268,57 @@ document.getElementById('btn-toggle-sync').addEventListener('click', async () =>
 renderMatrixVisualizer();
 checkAuthStatus();
 
-// â”€â”€ Cancel active transfer â”€â”€
+// ── Peer Picker Modal ──
+let peerPickerResolve = null;
+
+function showPeerPicker(peerIds, fileName) {
+    return new Promise((resolve) => {
+        peerPickerResolve = resolve;
+        document.getElementById('peer-picker-filename').textContent = fileName;
+        const list = document.getElementById('peer-picker-list');
+        list.innerHTML = '';
+        
+        peerIds.forEach(peerId => {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-outline';
+            btn.style.cssText = 'width: 100%; text-align: left; padding: 12px 16px; display: flex; align-items: center; gap: 12px;';
+            btn.innerHTML = `
+                <div style="width:32px;height:32px;border-radius:50%;background:var(--bg-input);display:flex;align-items:center;justify-content:center;">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="var(--green)" stroke-width="2" fill="none"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 10-16 0"/></svg>
+                </div>
+                <span class="monospace" style="font-size:13px;">${escapeHtml(peerId)}</span>
+                <span style="margin-left:auto;font-size:10px;color:var(--text-muted);">${peerConnectionStates[peerId] === 'connected' ? 'CONNECTED' : 'AVAILABLE'}</span>
+            `;
+            btn.addEventListener('click', () => {
+                closePeerPicker();
+                resolve(peerId);
+            });
+            list.appendChild(btn);
+        });
+        
+        const modal = document.getElementById('peer-picker-modal');
+        modal.classList.remove('hidden');
+        modal.setAttribute('aria-hidden', 'false');
+    });
+}
+
+function closePeerPicker() {
+    const modal = document.getElementById('peer-picker-modal');
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+    if (peerPickerResolve) {
+        peerPickerResolve(null); // Resolve with null (cancelled)
+        peerPickerResolve = null;
+    }
+}
+
+document.getElementById('peer-picker-close').addEventListener('click', closePeerPicker);
+document.getElementById('peer-picker-cancel-btn').addEventListener('click', closePeerPicker);
+document.getElementById('peer-picker-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closePeerPicker();
+});
+
+// ── Cancel active transfer ──
 function cancelTransfer(fileId) {
     delete activeTransfers[fileId];
     ['', 'full-'].forEach(prefix => {
@@ -1332,18 +1437,42 @@ setupDataChannel = function(targetId, dc) {
     };
 };
 
-// â”€â”€ Keyboard Shortcuts â”€â”€
+// ── Keyboard Shortcuts ──
+function showShortcutsModal() {
+    const modal = document.getElementById('shortcuts-modal');
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+}
+function closeShortcutsModal() {
+    const modal = document.getElementById('shortcuts-modal');
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+}
+document.getElementById('shortcuts-modal-close').addEventListener('click', closeShortcutsModal);
+document.getElementById('shortcuts-ok-btn').addEventListener('click', closeShortcutsModal);
+document.getElementById('shortcuts-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeShortcutsModal();
+});
+
 document.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
     if (e.key === '?' || e.key === '/') {
         e.preventDefault();
-        showToast('Shortcuts: Ctrl+O=Open, 1-4=Tabs, Esc=Cancel, ?=Help', 'info', 5000);
+        showShortcutsModal();
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'o') {
         e.preventDefault();
         document.getElementById('file-input').click();
     }
     if (e.key === 'Escape') {
+        // Close any open modals first
+        const peerPickerModal = document.getElementById('peer-picker-modal');
+        if (!peerPickerModal.classList.contains('hidden')) { closePeerPicker(); return; }
+        const shortcutsModal = document.getElementById('shortcuts-modal');
+        if (!shortcutsModal.classList.contains('hidden')) { closeShortcutsModal(); return; }
+        const shareModal = document.getElementById('share-modal');
+        if (!shareModal.classList.contains('hidden')) { closeShareModal(); return; }
+        // Otherwise cancel active transfer
         const ids = Object.keys(activeTransfers);
         if (ids.length > 0) { cancelTransfer(ids[0]); showToast('Transfer cancelled', 'info', 2000); }
     }
@@ -1388,6 +1517,24 @@ function generateQRCode(text, size) {
     qrWrap.appendChild(qr); heroCard.appendChild(qrWrap);
 })();
 
+// ── Retry failed transfer ──
+async function retryTransfer(historyItem) {
+    // For retry, we need the original file. Since we don't store the File object,
+    // we prompt the user to re-select the file.
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.addEventListener('change', () => {
+        const file = input.files[0];
+        if (file && file.name === historyItem.fileName) {
+            showToast(`Retrying: ${file.name}`, 'info', 2000);
+            dispatchFile(file);
+        } else if (file) {
+            showToast('File name does not match the original transfer', 'error');
+        }
+    });
+    input.click();
+}
+
 // ── Transfer History Rendering ──
 function formatFileSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
@@ -1422,10 +1569,13 @@ function renderHistory() {
         el.innerHTML = `
             <div class="history-icon ${iconClass}">${iconSymbol}</div>
             <div class="history-info">
-                <div class="history-name">${escapeHtml(item.fileName)}</div>
+                <div class="history-name">${getFileTypeIcon(item.fileName)} ${escapeHtml(item.fileName)}</div>
                 <div class="history-meta">${formatFileSize(item.fileSize)} \u00B7 ${timeStr} \u00B7 ${item.status}</div>
             </div>
-            ${item.status === 'completed' ? '<div class="history-actions"><button class="history-share-btn" data-idx="' + idx + '">SHARE LINK</button></div>' : ''}
+            <div class="history-actions">
+                ${item.status === 'failed' ? '<button class="history-retry-btn" data-idx="' + idx + '" style="margin-right:6px;">RETRY</button>' : ''}
+                ${item.status === 'completed' ? '<button class="history-share-btn" data-idx="' + idx + '">SHARE LINK</button>' : ''}
+            </div>
         `;
         list.appendChild(el);
     });
@@ -1436,6 +1586,15 @@ function renderHistory() {
             const idx = parseInt(btn.dataset.idx);
             const item = transferHistory[idx];
             if (item) openShareModal(item);
+        });
+    });
+    
+    // Attach retry button handlers
+    list.querySelectorAll('.history-retry-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const idx = parseInt(btn.dataset.idx);
+            const item = transferHistory[idx];
+            if (item) retryTransfer(item);
         });
     });
 }
