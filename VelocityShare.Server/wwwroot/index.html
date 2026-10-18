@@ -130,7 +130,7 @@
                                 <h3>Send files to peers</h3>
                                 <p>Drag & drop or click to browse</p>
                             </div>
-                            <span class="dz-hint">Max 50 MB per file &middot; P2P encrypted transfer</span>
+                            <span class="dz-hint">Unlimited file size &middot; P2P encrypted transfer</span>
                             <input type="file" id="file-input" class="hidden-input" multiple>
                         </div>
                     </div>
@@ -310,6 +310,25 @@
         </main>
     </div>
 
+    <!-- Peer Picker Modal -->
+    <div class="modal-overlay hidden" id="peer-picker-modal" aria-hidden="true">
+        <div class="modal-card" role="dialog" aria-labelledby="peer-picker-title">
+            <div class="modal-header">
+                <h2 id="peer-picker-title">Send to Peer</h2>
+                <button class="modal-close" id="peer-picker-close" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
+                    Multiple peers connected. Choose a recipient for: <strong id="peer-picker-filename"></strong>
+                </p>
+                <div id="peer-picker-list" style="display: flex; flex-direction: column; gap: 8px;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline btn-sm" id="peer-picker-cancel-btn">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Share Link Modal -->
     <div class="modal-overlay hidden" id="share-modal" aria-hidden="true">
         <div class="modal-card" role="dialog" aria-labelledby="share-modal-title">
@@ -351,6 +370,34 @@
             <div class="modal-footer">
                 <button class="btn btn-outline btn-sm" id="share-cancel-btn">Cancel</button>
                 <button class="btn btn-primary btn-sm" id="share-create-btn">Create Link</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Keyboard Shortcuts Modal -->
+    <div class="modal-overlay hidden" id="shortcuts-modal" aria-hidden="true">
+        <div class="modal-card" role="dialog" aria-labelledby="shortcuts-modal-title">
+            <div class="modal-header">
+                <h2 id="shortcuts-modal-title">Keyboard Shortcuts</h2>
+                <button class="modal-close" id="shortcuts-modal-close" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div style="display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px;">
+                    <kbd style="background:var(--bg-input);padding:2px 8px;border-radius:4px;font-family:monospace;font-size:12px;">Ctrl+O</kbd>
+                    <span style="color:var(--text-secondary);">Open file picker</span>
+                    
+                    <kbd style="background:var(--bg-input);padding:2px 8px;border-radius:4px;font-family:monospace;font-size:12px;">1-4</kbd>
+                    <span style="color:var(--text-secondary);">Switch tabs (Home, Transfers, Peers, Settings)</span>
+                    
+                    <kbd style="background:var(--bg-input);padding:2px 8px;border-radius:4px;font-family:monospace;font-size:12px;">Esc</kbd>
+                    <span style="color:var(--text-secondary);">Cancel active transfer / Close modal</span>
+                    
+                    <kbd style="background:var(--bg-input);padding:2px 8px;border-radius:4px;font-family:monospace;font-size:12px;">?</kbd>
+                    <span style="color:var(--text-secondary);">Show this help</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary btn-sm" id="shortcuts-ok-btn">Got it</button>
             </div>
         </div>
     </div>
