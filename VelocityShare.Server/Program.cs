@@ -1136,7 +1136,7 @@ app.Map("/ws/share", async (HttpContext context) =>
                                 byte[] key = message.Key;
                                 byte[] nonce = message.Nonce;
 
-                                string dropsiteFolder = Path.Combine(AppContext.BaseDirectory, "dropsite");
+                                string dropsiteFolder = dropsiteConfig["path"] ?? defaultUploadsDir;
                                 Directory.CreateDirectory(dropsiteFolder);
 
                                 var receiver = new VctpReceiver(dropsiteFolder, key, nonce, port: 0);
